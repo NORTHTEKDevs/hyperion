@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Datasets — fetched by the download scripts, never committed
+data/scan/raw/
+data/scan/addprim_jump/
+data/scan/length/
+data/scan/template/
+data/scan/mcd/
+data/scan/simple/
+data/scan/*.txt
+data/scan/*.bin
+data/cogs/raw/
+data/cogs/*.tsv
+data/cogs/*.bin
+data/cogs/meta.json
+data/pcfg/*.src
+data/pcfg/*.tgt
+data/pcfg/productivity/
+data/arc1d/1d_*/
+
+# Local artifacts
+*.sqlite
+*.db
+checkpoints/
+runs/
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key

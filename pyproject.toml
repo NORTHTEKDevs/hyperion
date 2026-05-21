@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyperion"
+version = "0.1.0"
+description = "Hyperdimensional VSA + program synthesis: 100% / 99.98% / 99.75% / 100% on SCAN / PCFG / COGS / 1D-ARC (zero gradient descent)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Kristian Baer", email = "info@northtek.io"},
+]
+keywords = [
+    "vector symbolic architecture",
+    "hyperdimensional computing",
+    "compositional generalization",
+    "SCAN",
+    "COGS",
+    "PCFG",
+    "1D-ARC",
+    "ARC-AGI",
+    "neuro-symbolic",
+    "program synthesis",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "requests>=2.31",
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/NORTHTEKDevs/hyperion"
+Repository = "https://github.com/NORTHTEKDevs/hyperion"
+Issues = "https://github.com/NORTHTEKDevs/hyperion/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pure_vsa*", "vsa_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = ["E501"]

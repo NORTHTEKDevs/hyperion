@@ -1,0 +1,85 @@
+cff-version: 1.2.0
+title: "Hyperion: pure-VSA compositional generalization"
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Baer
+    given-names: Kristian
+    affiliation: Northtek
+type: software
+version: 0.1.0
+date-released: 2026-05-20
+license: MIT
+repository-code: "https://github.com/NORTHTEKDevs/hyperion"
+keywords:
+  - vector symbolic architecture
+  - hyperdimensional computing
+  - compositional generalization
+  - SCAN
+  - VSA
+  - neuro-symbolic
+abstract: >
+  Hyperion is a research framework exploring whether compositional
+  generalization on SCAN-style benchmarks can be achieved with pure
+  hyperdimensional vector symbolic architecture (VSA) algebra plus a
+  Python-dict fact store, with zero gradient descent and zero neural-network
+  parameters. The pure-VSA track demonstrates deterministic 100% generalization
+  on TinySCAN held-out compositions at vocabularies up to 25,000 verbs with
+  D=2048 hypervectors, where a same-scale transformer baseline achieves
+  bimodal 0%-100% (mean 55%) on the same task.
+references:
+  - type: article
+    authors:
+      - family-names: Plate
+        given-names: Tony A.
+    title: "Holographic Reduced Representations"
+    journal: IEEE Transactions on Neural Networks
+    volume: 6
+    issue: 3
+    year: 1995
+    pages: "623--641"
+  - type: article
+    authors:
+      - family-names: Kanerva
+        given-names: Pentti
+    title: "Hyperdimensional Computing: An Introduction to Computing in Distributed Representation with High-Dimensional Random Vectors"
+    journal: Cognitive Computation
+    volume: 1
+    year: 2009
+    pages: "139--159"
+  - type: article
+    authors:
+      - family-names: Kleyko
+        given-names: Denis
+      - family-names: Rachkovskij
+        given-names: Dmitri A.
+      - family-names: Osipov
+        given-names: Evgeny
+      - family-names: Rahimi
+        given-names: Abbas
+    title: "A Survey on Hyperdimensional Computing aka Vector Symbolic Architectures, Part I"
+    journal: ACM Computing Surveys
+    year: 2022
+    identifiers:
+      - type: other
+        value: "arXiv:2111.06077"
+  - type: article
+    authors:
+      - family-names: Lake
+        given-names: Brenden M.
+      - family-names: Baroni
+        given-names: Marco
+    title: "Generalization without Systematicity: On the Compositional Skills of Sequence-to-Sequence Recurrent Networks"
+    conference:
+      name: "International Conference on Machine Learning (ICML)"
+    year: 2018
+  - type: article
+    authors:
+      - family-names: Joffe
+        given-names: Iris
+      - family-names: Eliasmith
+        given-names: Chris
+    title: "Vector Symbolic Algebras for the Abstraction and Reasoning Corpus"
+    year: 2025
+    identifiers:
+      - type: other
+        value: "arXiv:2511.08747"
