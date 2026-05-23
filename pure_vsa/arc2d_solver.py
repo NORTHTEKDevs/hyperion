@@ -647,6 +647,9 @@ def _selection_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs.append(Program("fill_with_majority_color", t_fill_with_majority_color))
     progs.append(Program("fill_with_majority_nonzero", t_fill_with_majority_nonzero))
     progs.append(Program("fill_with_minority_color", t_fill_with_minority_color))
+    progs.append(Program("replace_unique_with_majority", t_replace_unique_color_with_majority))
+    progs.append(Program("replace_unique_with_minority", t_replace_unique_color_with_minority))
+    progs.append(Program("keep_only_unique_color", t_only_keep_unique_color))
     return progs
 
 
@@ -705,6 +708,186 @@ def t_crop_to_color_bbox(g: Grid, color: int) -> Grid | None:
 def t_keep_only_color_mask(g: Grid, color: int, replace_with: int) -> Grid:
     """Output a mask: cells with `color` -> `replace_with`, others -> 0."""
     return [[replace_with if c == color else 0 for c in row] for row in g]
+
+
+def _detect_grid_dividers(g: Grid) -> tuple[list[int], list[int], int] | None:
+    """Detect rows/cols that are uniformly filled with a single non-zero color
+    (acting as grid dividers). Returns (divider_rows, divider_cols, color) or None.
+    Requires at least one divider row OR column."""
+    h, w = grid_dims(g)
+    if h < 3 or w < 3:
+        return None
+    # Find a candidate divider color: one that fills entire rows or entire cols.
+    candidates: dict[int, tuple[list[int], list[int]]] = {}
+    for color in range(1, 10):
+        rows = [r for r in range(h) if all(g[r][c] == color for c in range(w))]
+        cols = [c for c in range(w) if all(g[r][c] == color for r in range(h))]
+        if rows or cols:
+            candidates[color] = (rows, cols)
+    if not candidates:
+        return None
+    # Pick the color with the most dividers
+    color = max(candidates, key=lambda k: len(candidates[k][0]) + len(candidates[k][1]))
+    rows, cols = candidates[color]
+    if not rows and not cols:
+        return None
+    return rows, cols, color
+
+
+def _split_into_subgrids(g: Grid) -> list[list[dict]] | None:
+    """Split g into a 2D list of subgrids based on detected divider lines.
+    Each subgrid dict: {'grid': Grid, 'r0': int, 'c0': int}."""
+    info = _detect_grid_dividers(g)
+    if info is None:
+        return None
+    rows, cols, _ = info
+    h, w = grid_dims(g)
+    row_bounds = [-1] + rows + [h]
+    col_bounds = [-1] + cols + [w]
+    sub_rows: list[list[dict]] = []
+    for i in range(len(row_bounds) - 1):
+        r0, r1 = row_bounds[i] + 1, row_bounds[i + 1]
+        if r1 <= r0:
+            continue
+        row: list[dict] = []
+        for j in range(len(col_bounds) - 1):
+            c0, c1 = col_bounds[j] + 1, col_bounds[j + 1]
+            if c1 <= c0:
+                continue
+            sub = [grow[c0:c1] for grow in g[r0:r1]]
+            row.append({"grid": sub, "r0": r0, "c0": c0})
+        if row:
+            sub_rows.append(row)
+    if not sub_rows:
+        return None
+    return sub_rows
+
+
+def t_extract_unique_subgrid(g: Grid) -> Grid | None:
+    """If g is divided into NxM subgrids and exactly ONE subgrid differs from
+    the others (by content), return that unique one."""
+    subs = _split_into_subgrids(g)
+    if subs is None:
+        return None
+    flat: list[dict] = [s for row in subs for s in row]
+    if len(flat) < 2:
+        return None
+    # Group by content
+    from collections import Counter
+    keys = [tuple(tuple(r) for r in s["grid"]) for s in flat]
+    counts = Counter(keys)
+    if len(counts) != 2:
+        return None
+    # The unique one appears exactly once
+    for k, n in counts.items():
+        if n == 1:
+            for s, kk in zip(flat, keys):
+                if kk == k:
+                    return s["grid"]
+    return None
+
+
+def t_extract_majority_subgrid(g: Grid) -> Grid | None:
+    """Return the subgrid pattern that appears most often (the 'common' one)."""
+    subs = _split_into_subgrids(g)
+    if subs is None:
+        return None
+    flat = [s for row in subs for s in row]
+    if len(flat) < 2:
+        return None
+    from collections import Counter
+    keys = [tuple(tuple(r) for r in s["grid"]) for s in flat]
+    counts = Counter(keys)
+    most_common, _ = counts.most_common(1)[0]
+    return [list(r) for r in most_common]
+
+
+def t_extract_subgrid_with_max_color_count(g: Grid, target_color: int) -> Grid | None:
+    """Return the subgrid containing the most cells of target_color."""
+    subs = _split_into_subgrids(g)
+    if subs is None:
+        return None
+    flat = [s for row in subs for s in row]
+    if not flat:
+        return None
+    best = max(flat, key=lambda s: sum(row.count(target_color) for row in s["grid"]))
+    return best["grid"]
+
+
+def _detect_symmetry_axis(g: Grid) -> str | None:
+    """Detect if g has horizontal/vertical/both symmetry (ignoring zeros, i.e.,
+    treating any cell as 'compatible' if the mirror is zero)."""
+    h, w = grid_dims(g)
+    h_sym = all(
+        g[r][c] == 0 or g[r][w - 1 - c] == 0 or g[r][c] == g[r][w - 1 - c]
+        for r in range(h) for c in range(w // 2)
+    )
+    v_sym = all(
+        g[r][c] == 0 or g[h - 1 - r][c] == 0 or g[r][c] == g[h - 1 - r][c]
+        for c in range(w) for r in range(h // 2)
+    )
+    if h_sym and v_sym:
+        return "both"
+    if h_sym:
+        return "h"
+    if v_sym:
+        return "v"
+    return None
+
+
+def t_replace_unique_color_with_majority(g: Grid) -> Grid | None:
+    """If the grid has exactly one cell of a color that appears nowhere else,
+    replace it with the majority color. Common 'fix the broken cell' pattern."""
+    from collections import Counter
+    h, w = grid_dims(g)
+    c = Counter(v for row in g for v in row)
+    # Find a color that appears exactly once
+    singletons = [k for k, v in c.items() if v == 1]
+    if len(singletons) != 1:
+        return None
+    target = singletons[0]
+    # Majority color (most common, excluding target)
+    others = [(k, v) for k, v in c.items() if k != target]
+    if not others:
+        return None
+    majority = max(others, key=lambda x: x[1])[0]
+    return [[majority if v == target else v for v in row] for row in g]
+
+
+def t_replace_unique_color_with_minority(g: Grid) -> Grid | None:
+    """Same but replace with the least-common (non-target) color."""
+    from collections import Counter
+    h, w = grid_dims(g)
+    c = Counter(v for row in g for v in row)
+    singletons = [k for k, v in c.items() if v == 1]
+    if len(singletons) != 1:
+        return None
+    target = singletons[0]
+    others = [(k, v) for k, v in c.items() if k != target]
+    if not others:
+        return None
+    minority = min(others, key=lambda x: x[1])[0]
+    return [[minority if v == target else v for v in row] for row in g]
+
+
+def t_only_keep_unique_color(g: Grid) -> Grid | None:
+    """Inverse: keep only the cells that have the unique (singleton) color."""
+    from collections import Counter
+    c = Counter(v for row in g for v in row if v != 0)
+    singletons = [k for k, v in c.items() if v == 1]
+    if len(singletons) != 1:
+        return None
+    target = singletons[0]
+    return [[v if v == target else 0 for v in row] for row in g]
+
+
+def t_complete_detected_symmetry(g: Grid) -> Grid | None:
+    """If g has detected partial symmetry, complete it by mirroring filled
+    cells across the detected axis (only fills zeros)."""
+    axis = _detect_symmetry_axis(g)
+    if axis is None:
+        return None
+    return t_complete_symmetry(g, axis)
 
 
 def t_fill_with_majority_color(g: Grid) -> Grid | None:
@@ -902,6 +1085,32 @@ def _object_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def _subgrid_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Programs that decompose input into subgrids (divider-line detected) and
+    return one of them."""
+    progs: list[Program] = [
+        Program("extract_unique_subgrid", t_extract_unique_subgrid),
+        Program("extract_majority_subgrid", t_extract_majority_subgrid),
+    ]
+    # Try each color as a "target" for the subgrid-with-max-color-X selector
+    colors_seen: set[int] = set()
+    for inp, _ in train_pairs:
+        colors_seen.update(colors_in(inp))
+    colors_seen.discard(0)
+    for col in colors_seen:
+        progs.append(Program(
+            f"extract_subgrid_with_max_{col}",
+            lambda g, col=col: t_extract_subgrid_with_max_color_count(g, col),
+        ))
+    return progs
+
+
+def _detected_symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return []
+    return [Program("complete_detected_symmetry", t_complete_detected_symmetry)]
+
+
 def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return (
         _constant_programs(train_pairs)
@@ -912,8 +1121,10 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _fill_programs(train_pairs)
         + _gravity_programs(train_pairs)
         + _symmetry_programs(train_pairs)
+        + _detected_symmetry_programs(train_pairs)
         + _color_specific_programs(train_pairs)
         + _object_programs(train_pairs)
+        + _subgrid_programs(train_pairs)
     )
 
 
@@ -959,6 +1170,7 @@ def solve_task(task_data: dict, allow_compose: bool = True) -> tuple[str, Grid] 
             "keep_smallest_object_bycolor", "keep_smallest_object_any",
             "keep_only_majority_color", "keep_only_minority_color",
             "complete_symmetry_h", "complete_symmetry_v", "complete_symmetry_both",
+            "complete_detected_symmetry",
             "gravity_up", "gravity_down", "gravity_left", "gravity_right",
         } or p.name.startswith("recolor_") or p.name.startswith("shift_")
               or p.name.startswith("flood_fill_enclosed_")]
@@ -976,6 +1188,35 @@ def solve_task(task_data: dict, allow_compose: bool = True) -> tuple[str, Grid] 
                 ok, result = _try_program(p, train_pairs, test_inp)
                 if ok and result is not None:
                     return name, result
+
+        # Third pass: 3-step composition from a tight CORE library only.
+        # Pattern: geometric -> object-select -> recolor (or permutations).
+        core_geometric = [p for p in progs if p.name in {
+            "flip_h", "flip_v", "rotate90", "rotate180", "rotate270", "transpose",
+        }]
+        core_select = [p for p in progs if p.name in {
+            "keep_largest_object_bycolor", "keep_smallest_object_bycolor",
+            "keep_only_majority_color", "keep_only_minority_color",
+        }]
+        core_recolor = [p for p in progs if p.name.startswith("recolor_")
+                        or p.name.startswith("flood_fill_enclosed_")]
+        # Try geometric -> select -> recolor and select -> geometric -> recolor
+        for a in core_geometric + core_select:
+            for b in core_select + core_geometric:
+                if a is b:
+                    continue
+                for c in core_recolor:
+                    name = f"compose3:{a.name}>>{b.name}>>{c.name}"
+                    def composed3(g, a=a, b=b, c=c):
+                        r = a.apply(g)
+                        if r is None: return None
+                        r = b.apply(r)
+                        if r is None: return None
+                        return c.apply(r)
+                    p = Program(name, composed3)
+                    ok, result = _try_program(p, train_pairs, test_inp)
+                    if ok and result is not None:
+                        return name, result
 
     return None
 

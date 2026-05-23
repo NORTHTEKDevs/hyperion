@@ -16,6 +16,16 @@ This is a baseline, not a flagship. The point is to establish that the *mechanis
 | 6. + constant-output + per-color recolor map | ~40 | 8.25% (33/400) | 0.75% (3/400) |
 | 7. + object-level coordinate transforms (translate to marker, stamp at markers, gravity-toward-color) | ~55 | 8.50% (34/400) | 0.75% (3/400) |
 | 8. + fill-with-majority/minority-color (whole grid) | ~60 | **8.75% (35/400)** | **0.75% (3/400)** |
+| 9. + subgrid decomposition, detected-symmetry, 3-step composition, hole-fill | ~75 | 8.75% (35/400) | 0.75% (3/400) |
+
+**Plateau reached at iteration 9.** Each of these additions is real scaffolding (subgrid extraction primitives, symmetry-axis detection, 3-step composition with a tight core library, "fix the broken cell" primitives), but none caught new tasks. The honest reading: the cheap-primitive approach has reached its ceiling. Further progress requires:
+
+- A **substantially larger primitive library** (Hodel's ARC-DSL has ~150; we have ~75).
+- **Pattern matching** as a first-class operation (detect a motif in input, match against a template).
+- **Search heuristics** that guide enumeration by input properties (size, color count, object structure) rather than fixed order.
+- **Per-cell neighbor rules** (cellular-automaton style transformations).
+
+Each of these is multi-day engineering work, not a single-session add.
 
 Per-program-family wins after the final iteration:
 
