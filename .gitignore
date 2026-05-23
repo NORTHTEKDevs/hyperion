@@ -45,6 +45,8 @@ data/pcfg/*.src
 data/pcfg/*.tgt
 data/pcfg/productivity/
 data/arc1d/1d_*/
+data/arc_agi/training/
+data/arc_agi/evaluation/
 
 # Local artifacts
 *.sqlite
