@@ -248,6 +248,104 @@ def t_complete_symmetry(g: Grid, axis: str) -> Grid:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Object detection (connected components)
+# ---------------------------------------------------------------------------
+
+def find_objects(g: Grid, by_color: bool = True, diag: bool = False) -> list[dict]:
+    """Return list of objects. Each object is a dict:
+      { 'color': int, 'cells': set[(r,c)], 'bbox': (r0,c0,r1,c1) }.
+    by_color=True: connect cells of same color via 4-neighbor (or 8 if diag).
+    by_color=False: connect any non-zero cells regardless of color.
+    """
+    h, w = grid_dims(g)
+    visited = [[False] * w for _ in range(h)]
+    objects: list[dict] = []
+    neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    if diag:
+        neighbors += [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+    for r0 in range(h):
+        for c0 in range(w):
+            if visited[r0][c0] or g[r0][c0] == 0:
+                continue
+            color = g[r0][c0]
+            cells = set()
+            stack = [(r0, c0)]
+            while stack:
+                r, c = stack.pop()
+                if r < 0 or r >= h or c < 0 or c >= w or visited[r][c]:
+                    continue
+                if g[r][c] == 0:
+                    continue
+                if by_color and g[r][c] != color:
+                    continue
+                visited[r][c] = True
+                cells.add((r, c))
+                for dr, dc in neighbors:
+                    stack.append((r + dr, c + dc))
+            if cells:
+                rs = [r for r, _ in cells]; cs = [c for _, c in cells]
+                bbox = (min(rs), min(cs), max(rs), max(cs))
+                objects.append({"color": color, "cells": cells, "bbox": bbox})
+    return objects
+
+
+def t_keep_largest_object(g: Grid, by_color: bool = True) -> Grid:
+    objs = find_objects(g, by_color=by_color)
+    if not objs:
+        return grid_copy(g)
+    largest = max(objs, key=lambda o: len(o["cells"]))
+    h, w = grid_dims(g)
+    out = [[0] * w for _ in range(h)]
+    for r, c in largest["cells"]:
+        out[r][c] = largest["color"]
+    return out
+
+
+def t_keep_smallest_object(g: Grid, by_color: bool = True) -> Grid:
+    objs = find_objects(g, by_color=by_color)
+    if not objs:
+        return grid_copy(g)
+    smallest = min(objs, key=lambda o: len(o["cells"]))
+    h, w = grid_dims(g)
+    out = [[0] * w for _ in range(h)]
+    for r, c in smallest["cells"]:
+        out[r][c] = smallest["color"]
+    return out
+
+
+def t_crop_to_largest_object(g: Grid, by_color: bool = True) -> Grid | None:
+    objs = find_objects(g, by_color=by_color)
+    if not objs:
+        return None
+    largest = max(objs, key=lambda o: len(o["cells"]))
+    r0, c0, r1, c1 = largest["bbox"]
+    return [row[c0:c1 + 1] for row in g[r0:r1 + 1]]
+
+
+def t_recolor_by_size(g: Grid, size_to_color: dict[int, int]) -> Grid | None:
+    """Recolor each object to a color determined by its size."""
+    objs = find_objects(g, by_color=True)
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for o in objs:
+        sz = len(o["cells"])
+        if sz not in size_to_color:
+            return None
+        nc = size_to_color[sz]
+        for r, c in o["cells"]:
+            out[r][c] = nc
+    return out
+
+
+def t_count_objects_to_color(g: Grid, count_to_color: dict[int, int]) -> Grid | None:
+    """Output a 1x1 grid whose color encodes the object count."""
+    n = len(find_objects(g, by_color=True))
+    if n not in count_to_color:
+        return None
+    return [[count_to_color[n]]]
+
+
 def t_flood_fill_enclosed(g: Grid, fill_color: int) -> Grid:
     """Find all interior cells (zeros not connected to the border via 4-neighborhood
     through other zeros) and fill them with `fill_color`."""
@@ -472,42 +570,222 @@ def _symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def t_crop_to_color_bbox(g: Grid, color: int) -> Grid | None:
+    """Crop to bbox of cells with the given color."""
+    h, w = grid_dims(g)
+    min_r, max_r = h, -1; min_c, max_c = w, -1
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == color:
+                if r < min_r: min_r = r
+                if r > max_r: max_r = r
+                if c < min_c: min_c = c
+                if c > max_c: max_c = c
+    if max_r < 0:
+        return None
+    return [row[min_c:max_c + 1] for row in g[min_r:max_r + 1]]
+
+
+def t_keep_only_color_mask(g: Grid, color: int, replace_with: int) -> Grid:
+    """Output a mask: cells with `color` -> `replace_with`, others -> 0."""
+    return [[replace_with if c == color else 0 for c in row] for row in g]
+
+
+def _constant_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """If all training outputs are identical, output that constant grid."""
+    progs: list[Program] = []
+    if len(train_pairs) >= 2:
+        first_out = train_pairs[0][1]
+        if all(grid_equal(o, first_out) for _, o in train_pairs[1:]):
+            const = [row[:] for row in first_out]
+            progs.append(Program(
+                f"constant_output_{len(const)}x{len(const[0]) if const else 0}",
+                lambda g, c=const: [row[:] for row in c],
+            ))
+    return progs
+
+
+def _input_color_replace_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Recolor by mapping: input-color C -> output-color C', uniformly across grid."""
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    # Build per-color mapping by examining all train pairs
+    mapping: dict[int, int] = {}
+    consistent = True
+    for inp, out in train_pairs:
+        h, w = grid_dims(inp)
+        for r in range(h):
+            for c in range(w):
+                a = inp[r][c]; b = out[r][c]
+                if a in mapping and mapping[a] != b:
+                    consistent = False; break
+                mapping[a] = b
+            if not consistent:
+                break
+        if not consistent:
+            break
+    if consistent and mapping and any(k != v for k, v in mapping.items()):
+        m = dict(mapping)
+        def apply_map(g, m=m):
+            return [[m.get(c, c) for c in row] for row in g]
+        progs.append(Program(
+            f"recolor_map_{sorted(m.items())}",
+            apply_map,
+        ))
+    return progs
+
+
+def _color_specific_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    # crop to bbox of each color we've seen in training inputs (0..9)
+    colors_seen: set[int] = set()
+    for inp, _ in train_pairs:
+        colors_seen.update(colors_in(inp))
+    colors_seen.discard(0)
+    for col in colors_seen:
+        progs.append(Program(
+            f"crop_to_color_{col}_bbox",
+            lambda g, col=col: t_crop_to_color_bbox(g, col),
+        ))
+    return progs
+
+
+def _object_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    # Keep-largest / keep-smallest only make sense when output dimensions match input
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        progs.append(Program("keep_largest_object_bycolor", lambda g: t_keep_largest_object(g, by_color=True)))
+        progs.append(Program("keep_largest_object_any",     lambda g: t_keep_largest_object(g, by_color=False)))
+        progs.append(Program("keep_smallest_object_bycolor", lambda g: t_keep_smallest_object(g, by_color=True)))
+        progs.append(Program("keep_smallest_object_any",     lambda g: t_keep_smallest_object(g, by_color=False)))
+
+    # Crop-to-largest-object: applicable when output is smaller and matches a bbox crop
+    progs.append(Program("crop_to_largest_object_bycolor", lambda g: t_crop_to_largest_object(g, by_color=True)))
+    progs.append(Program("crop_to_largest_object_any",     lambda g: t_crop_to_largest_object(g, by_color=False)))
+
+    # Induced: size -> color mapping (recolor each object by its area)
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        # Build mapping by examining train pairs: each object in input has a size
+        # and (hopefully) a consistent recolor in output.
+        size_to_color: dict[int, int] = {}
+        consistent = True
+        for inp, out in train_pairs:
+            objs = find_objects(inp, by_color=True)
+            for o in objs:
+                sz = len(o["cells"])
+                colors_in_out = {out[r][c] for r, c in o["cells"]}
+                if len(colors_in_out) != 1:
+                    consistent = False; break
+                new_color = next(iter(colors_in_out))
+                if sz in size_to_color and size_to_color[sz] != new_color:
+                    consistent = False; break
+                size_to_color[sz] = new_color
+            if not consistent:
+                break
+        if consistent and size_to_color:
+            m = dict(size_to_color)
+            progs.append(Program(
+                f"recolor_by_size_{sorted(m.items())}",
+                lambda g, m=m: t_recolor_by_size(g, m),
+            ))
+
+    # Induced: object-count -> 1x1 color (e.g., "output a single cell whose color is # of objects+1")
+    all_1x1_outputs = all(grid_dims(o) == (1, 1) for _, o in train_pairs)
+    if all_1x1_outputs:
+        count_to_color: dict[int, int] = {}
+        consistent = True
+        for inp, out in train_pairs:
+            n = len(find_objects(inp, by_color=True))
+            c = out[0][0]
+            if n in count_to_color and count_to_color[n] != c:
+                consistent = False; break
+            count_to_color[n] = c
+        if consistent and count_to_color:
+            m = dict(count_to_color)
+            progs.append(Program(
+                f"count_objects_to_color_{sorted(m.items())}",
+                lambda g, m=m: t_count_objects_to_color(g, m),
+            ))
+
+    return progs
+
+
 def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return (
-        _shape_preserving_programs(train_pairs)
+        _constant_programs(train_pairs)
+        + _input_color_replace_programs(train_pairs)
+        + _shape_preserving_programs(train_pairs)
         + _scale_programs(train_pairs)
         + _selection_programs(train_pairs)
         + _fill_programs(train_pairs)
         + _gravity_programs(train_pairs)
         + _symmetry_programs(train_pairs)
+        + _color_specific_programs(train_pairs)
+        + _object_programs(train_pairs)
     )
 
 
-def solve_task(task_data: dict) -> tuple[str, Grid] | None:
+def _try_program(prog: Program, train_pairs, test_inp):
+    """Return (matches_all_training, test_output) — both None on exception."""
+    try:
+        outputs = []
+        for inp, out in train_pairs:
+            r = prog.apply(inp)
+            if r is None or not grid_equal(r, out):
+                return False, None
+            outputs.append(r)
+        test_r = prog.apply(test_inp)
+        if test_r is None:
+            return True, None
+        return True, test_r
+    except Exception:
+        return False, None
+
+
+def solve_task(task_data: dict, allow_compose: bool = True) -> tuple[str, Grid] | None:
     train = task_data.get("train", [])
     test = task_data.get("test", [])
     if not train or not test:
         return None
     train_pairs = [(t["input"], t["output"]) for t in train]
+    test_inp = test[0]["input"]
 
     progs = candidate_programs(train_pairs)
+    # First pass: single-primitive
     for prog in progs:
-        try:
-            ok = all(
-                (result := prog.apply(inp)) is not None and grid_equal(result, out)
-                for inp, out in train_pairs
-            )
-        except Exception:
-            ok = False
-        if ok:
-            test_inp = test[0]["input"]
-            try:
-                result = prog.apply(test_inp)
-            except Exception:
-                continue
-            if result is None:
-                continue
+        ok, result = _try_program(prog, train_pairs, test_inp)
+        if ok and result is not None:
             return prog.name, result
+
+    # Second pass: composition of two primitives prog_b(prog_a(g))
+    if allow_compose:
+        # Only compose shape-preserving programs to keep the search tractable
+        # and to ensure intermediate grids stay valid.
+        composable = [p for p in progs if p.name in {
+            "flip_h", "flip_v", "rotate90", "rotate180", "rotate270", "transpose",
+            "keep_largest_object_bycolor", "keep_largest_object_any",
+            "keep_smallest_object_bycolor", "keep_smallest_object_any",
+            "keep_only_majority_color", "keep_only_minority_color",
+            "complete_symmetry_h", "complete_symmetry_v", "complete_symmetry_both",
+            "gravity_up", "gravity_down", "gravity_left", "gravity_right",
+        } or p.name.startswith("recolor_") or p.name.startswith("shift_")
+              or p.name.startswith("flood_fill_enclosed_")]
+        for a in composable:
+            for b in composable:
+                if a is b:
+                    continue
+                name = f"compose:{a.name}>>{b.name}"
+                def composed(g, a=a, b=b):
+                    r = a.apply(g)
+                    if r is None:
+                        return None
+                    return b.apply(r)
+                p = Program(name, composed)
+                ok, result = _try_program(p, train_pairs, test_inp)
+                if ok and result is not None:
+                    return name, result
+
     return None
 
 
