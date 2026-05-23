@@ -338,6 +338,119 @@ def t_recolor_by_size(g: Grid, size_to_color: dict[int, int]) -> Grid | None:
     return out
 
 
+def _object_bbox_shape(obj: dict) -> tuple[int, int]:
+    r0, c0, r1, c1 = obj["bbox"]
+    return (r1 - r0 + 1, c1 - c0 + 1)
+
+
+def _object_cells_normalized(obj: dict) -> frozenset[tuple[int, int]]:
+    r0, c0, _, _ = obj["bbox"]
+    return frozenset((r - r0, c - c0) for r, c in obj["cells"])
+
+
+def t_translate_object_to_marker(g: Grid, obj_color: int, marker_color: int) -> Grid | None:
+    """Move the (single) object of `obj_color` so its top-left aligns with the
+    single cell of `marker_color`. Removes the marker."""
+    objs = find_objects(g, by_color=True)
+    obj_list = [o for o in objs if o["color"] == obj_color]
+    marker_list = [o for o in objs if o["color"] == marker_color and len(o["cells"]) == 1]
+    if len(obj_list) != 1 or len(marker_list) != 1:
+        return None
+    obj = obj_list[0]
+    mr, mc = next(iter(marker_list[0]["cells"]))
+    or0, oc0, _, _ = obj["bbox"]
+    dr, dc = mr - or0, mc - oc0
+    h, w = grid_dims(g)
+    out = [[0] * w for _ in range(h)]
+    # everything except the moved obj and the marker
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == obj_color or g[r][c] == marker_color:
+                continue
+            out[r][c] = g[r][c]
+    for r, c in obj["cells"]:
+        nr, nc = r + dr, c + dc
+        if 0 <= nr < h and 0 <= nc < w:
+            out[nr][nc] = obj_color
+    return out
+
+
+def t_copy_object_to_each_marker(g: Grid, obj_color: int, marker_color: int) -> Grid | None:
+    """Find the single object of `obj_color` (the 'template') and the singleton
+    cells of `marker_color`. Stamp the template at each marker, centered on the
+    marker. Remove markers."""
+    objs = find_objects(g, by_color=True)
+    obj_list = [o for o in objs if o["color"] == obj_color]
+    markers = [o for o in objs if o["color"] == marker_color and len(o["cells"]) == 1]
+    if len(obj_list) != 1 or not markers:
+        return None
+    template = obj_list[0]
+    th, tw = _object_bbox_shape(template)
+    cells_norm = _object_cells_normalized(template)
+    h, w = grid_dims(g)
+    out = [row[:] for row in g]
+    # clear markers
+    for m in markers:
+        mr, mc = next(iter(m["cells"]))
+        out[mr][mc] = 0
+    # stamp template centered on each marker
+    half_r, half_c = th // 2, tw // 2
+    for m in markers:
+        mr, mc = next(iter(m["cells"]))
+        for dr, dc in cells_norm:
+            nr, nc = mr - half_r + dr, mc - half_c + dc
+            if 0 <= nr < h and 0 <= nc < w:
+                out[nr][nc] = obj_color
+    return out
+
+
+def t_gravity_toward_color(g: Grid, mover_color: int, anchor_color: int, direction: str) -> Grid | None:
+    """Move all cells of `mover_color` toward the nearest cell of `anchor_color`
+    in the given direction (each column/row independently)."""
+    h, w = grid_dims(g)
+    out = [[0] * w for _ in range(h)]
+    # copy everything that isn't the mover
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] != mover_color:
+                out[r][c] = g[r][c]
+    if direction in ("up", "down"):
+        for c in range(w):
+            anchor_rows = [r for r in range(h) if g[r][c] == anchor_color]
+            mover_rows = [r for r in range(h) if g[r][c] == mover_color]
+            if not anchor_rows or not mover_rows:
+                # leave movers where they are
+                for r in mover_rows:
+                    out[r][c] = mover_color
+                continue
+            anchor_row = anchor_rows[0] if direction == "up" else anchor_rows[-1]
+            # stack movers adjacent to anchor
+            for i, _ in enumerate(mover_rows):
+                if direction == "down":
+                    nr = anchor_row - 1 - i
+                else:
+                    nr = anchor_row + 1 + i
+                if 0 <= nr < h:
+                    out[nr][c] = mover_color
+    elif direction in ("left", "right"):
+        for r in range(h):
+            anchor_cols = [c for c in range(w) if g[r][c] == anchor_color]
+            mover_cols = [c for c in range(w) if g[r][c] == mover_color]
+            if not anchor_cols or not mover_cols:
+                for c in mover_cols:
+                    out[r][c] = mover_color
+                continue
+            anchor_col = anchor_cols[0] if direction == "left" else anchor_cols[-1]
+            for i, _ in enumerate(mover_cols):
+                if direction == "right":
+                    nc = anchor_col - 1 - i
+                else:
+                    nc = anchor_col + 1 + i
+                if 0 <= nc < w:
+                    out[r][nc] = mover_color
+    return out
+
+
 def t_count_objects_to_color(g: Grid, count_to_color: dict[int, int]) -> Grid | None:
     """Output a 1x1 grid whose color encodes the object count."""
     n = len(find_objects(g, by_color=True))
@@ -707,6 +820,31 @@ def _object_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
                 f"count_objects_to_color_{sorted(m.items())}",
                 lambda g, m=m: t_count_objects_to_color(g, m),
             ))
+
+    # Translate-object-to-marker and stamp-template-at-markers: try all
+    # (object-color, marker-color) pairs from training inputs.
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        seen_colors: set[int] = set()
+        for inp, _ in train_pairs:
+            seen_colors.update(colors_in(inp))
+        seen_colors.discard(0)
+        for oc in seen_colors:
+            for mc in seen_colors:
+                if oc == mc:
+                    continue
+                progs.append(Program(
+                    f"translate_obj_{oc}_to_marker_{mc}",
+                    lambda g, oc=oc, mc=mc: t_translate_object_to_marker(g, oc, mc),
+                ))
+                progs.append(Program(
+                    f"stamp_obj_{oc}_at_markers_{mc}",
+                    lambda g, oc=oc, mc=mc: t_copy_object_to_each_marker(g, oc, mc),
+                ))
+                for d in ("up", "down", "left", "right"):
+                    progs.append(Program(
+                        f"gravity_{mc}_toward_{oc}_{d}",
+                        lambda g, mc=mc, oc=oc, d=d: t_gravity_toward_color(g, mc, oc, d),
+                    ))
 
     return progs
 

@@ -1,6 +1,6 @@
 # 2D ARC-AGI baseline
 
-**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~35-primitive library + composition, reaches **8.25% on the public training set (33 / 400)** and **0.75% on the held-out evaluation set (3 / 400)**.
+**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~55-primitive library + composition, reaches **8.50% on the public training set (34 / 400)** and **0.75% on the held-out evaluation set (3 / 400)**.
 
 This is a baseline, not a flagship. The point is to establish that the *mechanism* works on 2D and to measure how far an honest primitive library + composition gets you without specialized search heuristics.
 
@@ -13,7 +13,8 @@ This is a baseline, not a flagship. The point is to establish that the *mechanis
 | 3. + gravity, symmetry completion | ~30 | 6.00% (24/400) | 0.50% (2/400) |
 | 4. + connected-components object reasoning | ~38 | 7.25% (29/400) | 0.75% (3/400) |
 | 5. + composition (chain 2 primitives) | ~38 + composed | 7.75% (31/400) | 0.75% (3/400) |
-| 6. + constant-output + per-color recolor map | ~40 | **8.25% (33/400)** | **0.75% (3/400)** |
+| 6. + constant-output + per-color recolor map | ~40 | 8.25% (33/400) | 0.75% (3/400) |
+| 7. + object-level coordinate transforms (translate to marker, stamp at markers, gravity-toward-color) | ~55 | **8.50% (34/400)** | **0.75% (3/400)** |
 
 Per-program-family wins after the final iteration:
 
