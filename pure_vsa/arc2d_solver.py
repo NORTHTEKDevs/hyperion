@@ -644,6 +644,9 @@ def _selection_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         return progs
     progs.append(Program("keep_only_majority_color", t_keep_only_majority))
     progs.append(Program("keep_only_minority_color", t_keep_only_minority))
+    progs.append(Program("fill_with_majority_color", t_fill_with_majority_color))
+    progs.append(Program("fill_with_majority_nonzero", t_fill_with_majority_nonzero))
+    progs.append(Program("fill_with_minority_color", t_fill_with_minority_color))
     return progs
 
 
@@ -702,6 +705,56 @@ def t_crop_to_color_bbox(g: Grid, color: int) -> Grid | None:
 def t_keep_only_color_mask(g: Grid, color: int, replace_with: int) -> Grid:
     """Output a mask: cells with `color` -> `replace_with`, others -> 0."""
     return [[replace_with if c == color else 0 for c in row] for row in g]
+
+
+def t_fill_with_majority_color(g: Grid) -> Grid | None:
+    """Output grid is same shape, filled entirely with the most common color in input."""
+    from collections import Counter
+    h, w = grid_dims(g)
+    c = Counter(v for row in g for v in row)
+    if not c:
+        return None
+    color, _ = c.most_common(1)[0]
+    return [[color] * w for _ in range(h)]
+
+
+def t_fill_with_minority_color(g: Grid) -> Grid | None:
+    from collections import Counter
+    h, w = grid_dims(g)
+    c = Counter(v for row in g for v in row if v != 0)
+    if not c:
+        return None
+    color, _ = c.most_common()[-1]
+    return [[color] * w for _ in range(h)]
+
+
+def t_fill_with_majority_nonzero(g: Grid) -> Grid | None:
+    from collections import Counter
+    h, w = grid_dims(g)
+    c = Counter(v for row in g for v in row if v != 0)
+    if not c:
+        return None
+    color, _ = c.most_common(1)[0]
+    return [[color] * w for _ in range(h)]
+
+
+def _row_uniformity_check(row: list[int]) -> bool:
+    """All non-zero cells in row have same color (zeros allowed)."""
+    nonzero = [c for c in row if c != 0]
+    return len(set(nonzero)) <= 1 and len(nonzero) > 0
+
+
+def t_per_row_uniform_to_color(g: Grid, uniform_color: int, nonuniform_color: int) -> Grid:
+    """For each row: if all non-zero cells have the same color, output a row of
+    `uniform_color`; else output a row of `nonuniform_color`."""
+    h, w = grid_dims(g)
+    out: Grid = []
+    for r in range(h):
+        nonzero = [c for c in g[r] if c != 0]
+        all_same = len(set(nonzero)) <= 1 and len(nonzero) > 0
+        v = uniform_color if all_same else nonuniform_color
+        out.append([v] * w)
+    return out
 
 
 def _constant_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
