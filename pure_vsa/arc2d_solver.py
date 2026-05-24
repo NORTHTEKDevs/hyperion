@@ -1601,6 +1601,25 @@ def _object_overlay_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
     return progs
 
 
+def _object_arrange_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Programs that rearrange objects within the same-shape canvas."""
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    for axis in ("h", "v"):
+        for asc in (True, False):
+            progs.append(Program(
+                f"sort_objects_by_size_{axis}_{'asc' if asc else 'desc'}",
+                lambda g, axis=axis, asc=asc: t_sort_objects_by_size_along_axis(g, axis, asc),
+            ))
+    for corner in ("tl", "tr", "bl", "br"):
+        progs.append(Program(
+            f"compact_objects_to_{corner}",
+            lambda g, corner=corner: t_compact_objects_to_corner(g, corner),
+        ))
+    return progs
+
+
 def _per_object_transform_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2189,6 +2208,90 @@ def t_stamp_pattern_at_marker(g: Grid, marker_color: int, pattern: dict[tuple[in
         nr, nc = mr + dr, mc + dc
         if 0 <= nr < h and 0 <= nc < w:
             out[nr][nc] = color
+    return out
+
+
+def t_sort_objects_by_size_along_axis(g: Grid, axis: str, ascending: bool) -> Grid | None:
+    """Stack objects along an axis (top→bottom or left→right) sorted by size."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if len(objs) < 2:
+        return None
+    # Sort by size
+    objs_sorted = sorted(objs, key=lambda o: len(o["cells"]), reverse=not ascending)
+    # Place each object's bbox along the axis, starting at top-left
+    out: Grid = [[0] * w for _ in range(h)]
+    if axis == "v":
+        cur_r = 0
+        for o in objs_sorted:
+            r0, c0, r1, c1 = o["bbox"]
+            oh = r1 - r0 + 1
+            for r, c in o["cells"]:
+                nr = cur_r + (r - r0)
+                if 0 <= nr < h:
+                    out[nr][c] = o["color"]
+            cur_r += oh
+    elif axis == "h":
+        cur_c = 0
+        for o in objs_sorted:
+            r0, c0, r1, c1 = o["bbox"]
+            ow = c1 - c0 + 1
+            for r, c in o["cells"]:
+                nc = cur_c + (c - c0)
+                if 0 <= nc < w:
+                    out[r][nc] = o["color"]
+            cur_c += ow
+    else:
+        return None
+    return out
+
+
+def t_compact_objects_to_corner(g: Grid, corner: str) -> Grid | None:
+    """Move all objects to the specified corner, stacking them."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out: Grid = [[0] * w for _ in range(h)]
+    if corner == "tl":
+        cur_r, cur_c = 0, 0
+        for o in sorted(objs, key=lambda o: -len(o["cells"])):
+            r0, c0, r1, c1 = o["bbox"]
+            for r, c in o["cells"]:
+                nr = cur_r + (r - r0); nc = cur_c + (c - c0)
+                if 0 <= nr < h and 0 <= nc < w:
+                    out[nr][nc] = o["color"]
+            cur_r += (r1 - r0 + 1)
+    elif corner == "tr":
+        cur_c = w
+        for o in sorted(objs, key=lambda o: -len(o["cells"])):
+            r0, c0, r1, c1 = o["bbox"]
+            ow = c1 - c0 + 1
+            cur_c -= ow
+            for r, c in o["cells"]:
+                nr = (r - r0); nc = cur_c + (c - c0)
+                if 0 <= nr < h and 0 <= nc < w:
+                    out[nr][nc] = o["color"]
+    elif corner == "bl":
+        cur_r = h
+        for o in sorted(objs, key=lambda o: -len(o["cells"])):
+            r0, c0, r1, c1 = o["bbox"]
+            oh = r1 - r0 + 1
+            cur_r -= oh
+            for r, c in o["cells"]:
+                nr = cur_r + (r - r0); nc = (c - c0)
+                if 0 <= nr < h and 0 <= nc < w:
+                    out[nr][nc] = o["color"]
+    elif corner == "br":
+        cur_r, cur_c = h, w
+        for o in sorted(objs, key=lambda o: -len(o["cells"])):
+            r0, c0, r1, c1 = o["bbox"]
+            oh = r1 - r0 + 1; ow = c1 - c0 + 1
+            cur_r -= oh; cur_c -= ow
+            for r, c in o["cells"]:
+                nr = cur_r + (r - r0); nc = cur_c + (c - c0)
+                if 0 <= nr < h and 0 <= nc < w:
+                    out[nr][nc] = o["color"]
     return out
 
 
@@ -2787,6 +2890,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _radial_symmetry_programs(train_pairs)
         + _mask_programs(train_pairs)
         + _object_overlay_programs(train_pairs)
+        + _object_arrange_programs(train_pairs)
         + _alignment_programs(train_pairs)
         + _noise_removal_programs(train_pairs)
         + _marker_pattern_programs(train_pairs)
@@ -2863,7 +2967,40 @@ def _shape_relation(train_pairs) -> str:
     return "mixed"
 
 
-def solve_task(task_data: dict, allow_compose: bool = True) -> tuple[str, Grid] | None:
+def _expected_output_signature(train_pairs):
+    """Compute features of training outputs that any valid test output should also satisfy."""
+    sigs = []
+    for inp, out in train_pairs:
+        sigs.append({
+            "colors": frozenset(colors_in(out)),
+            "dims": grid_dims(out),
+            "n_nonzero": sum(1 for row in out for c in row if c != 0),
+        })
+    return sigs
+
+
+def _score_candidate(candidate_out: Grid, training_sigs) -> float:
+    """Higher = better match to the training output signature."""
+    score = 0.0
+    cand_colors = frozenset(colors_in(candidate_out))
+    cand_dims = grid_dims(candidate_out)
+    cand_nz = sum(1 for row in candidate_out for c in row if c != 0)
+    # Color overlap with training outputs
+    overlap_scores = []
+    for sig in training_sigs:
+        # Color jaccard
+        if sig["colors"] or cand_colors:
+            jac = len(cand_colors & sig["colors"]) / max(1, len(cand_colors | sig["colors"]))
+            overlap_scores.append(jac)
+        # Non-zero count similarity
+        diff = abs(cand_nz - sig["n_nonzero"]) / max(1, max(cand_nz, sig["n_nonzero"]))
+        overlap_scores.append(1.0 - diff)
+    if overlap_scores:
+        score += sum(overlap_scores) / len(overlap_scores)
+    return score
+
+
+def solve_task(task_data: dict, allow_compose: bool = True, smart_rank: bool = False) -> tuple[str, Grid] | None:
     train = task_data.get("train", [])
     test = task_data.get("test", [])
     if not train or not test:
@@ -2872,11 +3009,30 @@ def solve_task(task_data: dict, allow_compose: bool = True) -> tuple[str, Grid] 
     test_inp = test[0]["input"]
 
     progs = candidate_programs(train_pairs)
-    # First pass: single-primitive
-    for prog in progs:
-        ok, result = _try_program(prog, train_pairs, test_inp)
-        if ok and result is not None:
-            return prog.name, result
+
+    if smart_rank:
+        # Collect ALL programs that match training, then rank by output-signature
+        # similarity to training outputs. This catches cases where multiple
+        # programs match training but only one produces a valid-looking test
+        # output.
+        training_sigs = _expected_output_signature(train_pairs)
+        candidates = []
+        for prog in progs:
+            ok, result = _try_program(prog, train_pairs, test_inp)
+            if ok and result is not None:
+                candidates.append((prog, result))
+                if len(candidates) >= 20:  # don't search forever
+                    break
+        if candidates:
+            # Score and pick the best
+            best = max(candidates, key=lambda pr: _score_candidate(pr[1], training_sigs))
+            return best[0].name, best[1]
+    else:
+        # First-match wins (original behavior)
+        for prog in progs:
+            ok, result = _try_program(prog, train_pairs, test_inp)
+            if ok and result is not None:
+                return prog.name, result
 
     # Second pass: composition of two primitives prog_b(prog_a(g))
     if allow_compose:
