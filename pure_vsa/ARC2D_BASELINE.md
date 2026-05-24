@@ -1,6 +1,6 @@
 # 2D ARC-AGI baseline
 
-**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~60-primitive library + composition, reaches **8.75% on the public training set (35 / 400)** and **0.75% on the held-out evaluation set (3 / 400)**.
+**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~90-primitive library + composition + cellular-automaton rule induction, reaches **10.25% on the public training set (41 / 400)** and **1.25% on the held-out evaluation set (5 / 400)**.
 
 This is a baseline, not a flagship. The point is to establish that the *mechanism* works on 2D and to measure how far an honest primitive library + composition gets you without specialized search heuristics.
 
@@ -17,8 +17,12 @@ This is a baseline, not a flagship. The point is to establish that the *mechanis
 | 7. + object-level coordinate transforms (translate to marker, stamp at markers, gravity-toward-color) | ~55 | 8.50% (34/400) | 0.75% (3/400) |
 | 8. + fill-with-majority/minority-color (whole grid) | ~60 | **8.75% (35/400)** | **0.75% (3/400)** |
 | 9. + subgrid decomposition, detected-symmetry, 3-step composition, hole-fill | ~75 | 8.75% (35/400) | 0.75% (3/400) |
+| 10. + cellular-automaton rule induction (neighbor signature, neighbor count) | ~78 | 9.75% (39/400) | 0.75% (3/400) |
+| 11. + tiled-pattern completion, drawing/outline primitives, size-recolor, color permutation | ~90 | **10.25% (41/400)** | **1.25% (5/400)** |
 
-**Plateau reached at iteration 9.** Each of these additions is real scaffolding (subgrid extraction primitives, symmetry-axis detection, 3-step composition with a tight core library, "fix the broken cell" primitives), but none caught new tasks. The honest reading: the cheap-primitive approach has reached its ceiling. Further progress requires:
+**Plateau broken at iteration 10** by the CA-rule induction primitive (the first one that actually learns a per-cell transformation from training data instead of being a hand-coded geometric op). It's the most general primitive in the library and unlocked patterns the geometric primitives couldn't reach.
+
+**Plateau reached at iteration 9 (now superseded).** Each of these additions is real scaffolding (subgrid extraction primitives, symmetry-axis detection, 3-step composition with a tight core library, "fix the broken cell" primitives), but none caught new tasks. The honest reading: the cheap-primitive approach has reached its ceiling. Further progress requires:
 
 - A **substantially larger primitive library** (Hodel's ARC-DSL has ~150; we have ~75).
 - **Pattern matching** as a first-class operation (detect a motif in input, match against a template).

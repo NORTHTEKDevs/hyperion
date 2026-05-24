@@ -835,6 +835,107 @@ def _detect_symmetry_axis(g: Grid) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Cellular-automaton-style local rule induction
+# ---------------------------------------------------------------------------
+
+def _neighbor_signature(g: Grid, r: int, c: int, k: int = 1) -> tuple:
+    """Frozen signature of (k×2+1)×(k×2+1) neighborhood, edges padded with -1."""
+    h, w = grid_dims(g)
+    cells = []
+    for dr in range(-k, k + 1):
+        for dc in range(-k, k + 1):
+            if dr == 0 and dc == 0:
+                continue
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < h and 0 <= nc < w:
+                cells.append(g[nr][nc])
+            else:
+                cells.append(-1)
+    return tuple(cells)
+
+
+def _learn_ca_rule(train_pairs: list[tuple[Grid, Grid]]):
+    """Induce a per-cell rule mapping (input_color, neighbor_signature) -> output_color.
+    Returns the rule dict or None if not consistent across training pairs.
+    """
+    rule: dict[tuple, int] = {}
+    for inp, out in train_pairs:
+        if grid_dims(inp) != grid_dims(out):
+            return None
+        h, w = grid_dims(inp)
+        for r in range(h):
+            for c in range(w):
+                key = (inp[r][c], _neighbor_signature(inp, r, c, k=1))
+                val = out[r][c]
+                if key in rule:
+                    if rule[key] != val:
+                        return None
+                else:
+                    rule[key] = val
+    return rule
+
+
+def _learn_ca_rule_by_color_count(train_pairs: list[tuple[Grid, Grid]]):
+    """Simpler CA rule: output cell depends only on (input_color, Counter of neighbor colors).
+    Less specific than full neighbor signature, so generalizes better."""
+    from collections import Counter
+    rule: dict[tuple, int] = {}
+    for inp, out in train_pairs:
+        if grid_dims(inp) != grid_dims(out):
+            return None
+        h, w = grid_dims(inp)
+        for r in range(h):
+            for c in range(w):
+                neighbors = []
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < h and 0 <= nc < w:
+                            neighbors.append(inp[nr][nc])
+                key = (inp[r][c], tuple(sorted(Counter(neighbors).items())))
+                val = out[r][c]
+                if key in rule and rule[key] != val:
+                    return None
+                rule[key] = val
+    return rule
+
+
+def t_apply_ca_rule(g: Grid, rule: dict[tuple, int]) -> Grid | None:
+    h, w = grid_dims(g)
+    out: Grid = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            key = (g[r][c], _neighbor_signature(g, r, c, k=1))
+            if key not in rule:
+                return None
+            out[r][c] = rule[key]
+    return out
+
+
+def t_apply_ca_rule_count(g: Grid, rule: dict[tuple, int]) -> Grid | None:
+    from collections import Counter
+    h, w = grid_dims(g)
+    out: Grid = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            neighbors = []
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < h and 0 <= nc < w:
+                        neighbors.append(g[nr][nc])
+            key = (g[r][c], tuple(sorted(Counter(neighbors).items())))
+            if key not in rule:
+                return None
+            out[r][c] = rule[key]
+    return out
+
+
 def t_replace_unique_color_with_majority(g: Grid) -> Grid | None:
     """If the grid has exactly one cell of a color that appears nowhere else,
     replace it with the majority color. Common 'fix the broken cell' pattern."""
@@ -951,6 +1052,41 @@ def _constant_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
                 f"constant_output_{len(const)}x{len(const[0]) if const else 0}",
                 lambda g, c=const: [row[:] for row in c],
             ))
+    return progs
+
+
+def _color_permutation_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Detect a color permutation (swap, cycle) that maps inputs to outputs."""
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    # Try to fit a permutation by examining all (input_color, output_color) pairs
+    pairs_set: set[tuple[int, int]] = set()
+    for inp, out in train_pairs:
+        h, w = grid_dims(inp)
+        for r in range(h):
+            for c in range(w):
+                pairs_set.add((inp[r][c], out[r][c]))
+    # Build a function: each input color maps to ONE output color
+    forward: dict[int, int] = {}
+    for a, b in pairs_set:
+        if a in forward and forward[a] != b:
+            return progs  # not a function
+        forward[a] = b
+    # Check if it's a permutation (each output mapped to by exactly one input)
+    reverse: dict[int, int] = {}
+    for a, b in forward.items():
+        if b in reverse:
+            return progs
+        reverse[b] = a
+    # Skip identity
+    if all(k == v for k, v in forward.items()):
+        return progs
+    m = dict(forward)
+    progs.append(Program(
+        f"color_perm_{sorted(m.items())}",
+        lambda g, m=m: [[m.get(c, c) for c in row] for row in g],
+    ))
     return progs
 
 
@@ -1085,6 +1221,51 @@ def _object_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def _pattern_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        progs.append(Program("complete_tiled_pattern", t_complete_tiled_pattern))
+    # extract_tile only valid when output dimensions can be a divisor of input
+    progs.append(Program("extract_tile", t_extract_tile))
+    return progs
+
+
+def _drawing_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Programs that draw frames/outlines using a learned color."""
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    # Find colors that appear in outputs but not inputs (candidate frame colors)
+    new_colors: set[int] = set()
+    for inp, out in train_pairs:
+        new_colors.update(colors_in(out) - colors_in(inp))
+    new_colors.discard(0)
+    for col in new_colors:
+        progs.append(Program(f"draw_bbox_frame_{col}", lambda g, col=col: t_draw_bbox_frame(g, col)))
+        progs.append(Program(f"outline_objects_{col}", lambda g, col=col: t_outline_objects(g, col)))
+    return progs
+
+
+def _recolor_size_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    # Find colors that appear in outputs but not inputs (candidate small/large colors)
+    seen: set[int] = set()
+    for inp, out in train_pairs:
+        seen.update(colors_in(out) - colors_in(inp))
+    seen.discard(0)
+    for sc in seen:
+        for lc in seen:
+            if sc == lc:
+                continue
+            progs.append(Program(
+                f"recolor_objs_by_size_small_{sc}_large_{lc}",
+                lambda g, sc=sc, lc=lc: t_recolor_objects_by_size(g, sc, lc),
+            ))
+    return progs
+
+
 def _subgrid_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """Programs that decompose input into subgrids (divider-line detected) and
     return one of them."""
@@ -1111,10 +1292,173 @@ def _detected_symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Pr
     return [Program("complete_detected_symmetry", t_complete_detected_symmetry)]
 
 
+def t_draw_bbox_frame(g: Grid, frame_color: int) -> Grid:
+    """For the bbox of all non-zero cells, draw a frame (border only) in frame_color."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    min_r, max_r = h, -1; min_c, max_c = w, -1
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] != 0:
+                if r < min_r: min_r = r
+                if r > max_r: max_r = r
+                if c < min_c: min_c = c
+                if c > max_c: max_c = c
+    if max_r < 0:
+        return out
+    for c in range(min_c, max_c + 1):
+        if out[min_r][c] == 0: out[min_r][c] = frame_color
+        if out[max_r][c] == 0: out[max_r][c] = frame_color
+    for r in range(min_r, max_r + 1):
+        if out[r][min_c] == 0: out[r][min_c] = frame_color
+        if out[r][max_c] == 0: out[r][max_c] = frame_color
+    return out
+
+
+def t_outline_objects(g: Grid, outline_color: int) -> Grid:
+    """For each connected object, draw an outline of cells just outside it."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] != 0:
+                continue
+            # If any 4-neighbor is non-zero, this cell is an outline cell
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and g[nr][nc] != 0:
+                    out[r][c] = outline_color
+                    break
+    return out
+
+
+def t_recolor_objects_by_size(g: Grid, small_color: int, large_color: int) -> Grid | None:
+    """Recolor the smallest object to small_color and the largest to large_color."""
+    objs = find_objects(g, by_color=True)
+    if len(objs) < 2:
+        return None
+    sizes = sorted(set(len(o["cells"]) for o in objs))
+    if len(sizes) < 2:
+        return None
+    smallest_sz, largest_sz = sizes[0], sizes[-1]
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for o in objs:
+        sz = len(o["cells"])
+        if sz == smallest_sz:
+            for r, c in o["cells"]:
+                out[r][c] = small_color
+        elif sz == largest_sz:
+            for r, c in o["cells"]:
+                out[r][c] = large_color
+    return out
+
+
+def _detect_tile_period(g: Grid) -> tuple[int, int] | None:
+    """Detect the period (ph, pw) of a tiled pattern. Returns smallest (ph, pw)
+    such that g[r][c] == g[(r%ph)][(c%pw)] for all cells (allowing zeros as 'unknown')."""
+    h, w = grid_dims(g)
+    for ph in range(1, h + 1):
+        for pw in range(1, w + 1):
+            if h % ph != 0 or w % pw != 0:
+                continue
+            if ph == h and pw == w:
+                continue
+            # Build the tile from non-zero cells across all instances
+            tile: dict[tuple[int, int], int] = {}
+            consistent = True
+            for r in range(h):
+                for c in range(w):
+                    v = g[r][c]
+                    if v == 0:
+                        continue
+                    key = (r % ph, c % pw)
+                    if key in tile and tile[key] != v:
+                        consistent = False; break
+                    tile[key] = v
+                if not consistent:
+                    break
+            if consistent and tile:
+                return (ph, pw)
+    return None
+
+
+def t_complete_tiled_pattern(g: Grid) -> Grid | None:
+    """Detect the period, build the tile from all instances, fill in zeros
+    everywhere that should be filled per the period."""
+    period = _detect_tile_period(g)
+    if period is None:
+        return None
+    ph, pw = period
+    h, w = grid_dims(g)
+    tile: dict[tuple[int, int], int] = {}
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] != 0:
+                tile[(r % ph, c % pw)] = g[r][c]
+    out: Grid = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            key = (r % ph, c % pw)
+            if key in tile:
+                out[r][c] = tile[key]
+    return out
+
+
+def t_extract_tile(g: Grid) -> Grid | None:
+    """If g is tiled, return one tile."""
+    period = _detect_tile_period(g)
+    if period is None:
+        return None
+    ph, pw = period
+    h, w = grid_dims(g)
+    tile: dict[tuple[int, int], int] = {}
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] != 0:
+                tile[(r % ph, c % pw)] = g[r][c]
+    return [[tile.get((r, c), 0) for c in range(pw)] for r in range(ph)]
+
+
+def _ca_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    rule = _learn_ca_rule(train_pairs)
+    if rule is not None:
+        progs.append(Program("ca_rule_neighbor_sig", lambda g, r=rule: t_apply_ca_rule(g, r)))
+    rule_c = _learn_ca_rule_by_color_count(train_pairs)
+    if rule_c is not None:
+        progs.append(Program("ca_rule_neighbor_count", lambda g, r=rule_c: t_apply_ca_rule_count(g, r)))
+    # Also learn a rule keyed only on the input color (no neighbors) — degenerate
+    # to a pure color remap, but useful when the CA rules above fail because of
+    # neighbor noise.
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        simple: dict[int, int] = {}
+        consistent = True
+        for inp, out in train_pairs:
+            h, w = grid_dims(inp)
+            for r in range(h):
+                for c in range(w):
+                    a, b = inp[r][c], out[r][c]
+                    if a in simple and simple[a] != b:
+                        consistent = False; break
+                    simple[a] = b
+                if not consistent: break
+            if not consistent: break
+        if consistent and any(k != v for k, v in simple.items()):
+            m = dict(simple)
+            progs.append(Program(
+                f"ca_color_only_{sorted(m.items())}",
+                lambda g, m=m: [[m.get(c, c) for c in row] for row in g],
+            ))
+    return progs
+
+
 def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return (
         _constant_programs(train_pairs)
+        + _color_permutation_programs(train_pairs)
         + _input_color_replace_programs(train_pairs)
+        + _ca_programs(train_pairs)
         + _shape_preserving_programs(train_pairs)
         + _scale_programs(train_pairs)
         + _selection_programs(train_pairs)
@@ -1125,6 +1469,9 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _color_specific_programs(train_pairs)
         + _object_programs(train_pairs)
         + _subgrid_programs(train_pairs)
+        + _pattern_programs(train_pairs)
+        + _drawing_programs(train_pairs)
+        + _recolor_size_programs(train_pairs)
     )
 
 
