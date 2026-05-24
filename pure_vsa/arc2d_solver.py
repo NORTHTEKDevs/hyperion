@@ -707,6 +707,55 @@ def _symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def t_extract_object_bbox_grid(g: Grid, color: int) -> Grid | None:
+    """Crop to the bbox of cells of `color`, returning the bbox area (with all cells, not just color)."""
+    h, w = grid_dims(g)
+    min_r, max_r = h, -1; min_c, max_c = w, -1
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == color:
+                if r < min_r: min_r = r
+                if r > max_r: max_r = r
+                if c < min_c: min_c = c
+                if c > max_c: max_c = c
+    if max_r < 0:
+        return None
+    return [row[min_c:max_c + 1] for row in g[min_r:max_r + 1]]
+
+
+def t_extract_largest_object_bbox_grid(g: Grid) -> Grid | None:
+    """Crop to the bbox of the largest connected object (returning the bbox area including
+    any non-object cells inside the bbox)."""
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    largest = max(objs, key=lambda o: len(o["cells"]))
+    r0, c0, r1, c1 = largest["bbox"]
+    return [row[c0:c1 + 1] for row in g[r0:r1 + 1]]
+
+
+def t_extract_non_majority_subgrid(g: Grid) -> Grid | None:
+    """If g is divided into subgrids and one differs from the majority pattern,
+    return that 'odd' one. Same as extract_unique_subgrid but tolerates more
+    structural differences."""
+    subs = _split_into_subgrids(g)
+    if subs is None:
+        return None
+    flat = [s for row in subs for s in row]
+    if len(flat) < 3:
+        return None
+    from collections import Counter
+    keys = [tuple(tuple(r) for r in s["grid"]) for s in flat]
+    counts = Counter(keys)
+    if len(counts) != 2:
+        return None
+    minority_key, _ = counts.most_common()[-1]
+    for s, k in zip(flat, keys):
+        if k == minority_key:
+            return s["grid"]
+    return None
+
+
 def t_crop_to_color_bbox(g: Grid, color: int) -> Grid | None:
     """Crop to bbox of cells with the given color."""
     h, w = grid_dims(g)
@@ -726,6 +775,26 @@ def t_crop_to_color_bbox(g: Grid, color: int) -> Grid | None:
 def t_keep_only_color_mask(g: Grid, color: int, replace_with: int) -> Grid:
     """Output a mask: cells with `color` -> `replace_with`, others -> 0."""
     return [[replace_with if c == color else 0 for c in row] for row in g]
+
+
+def _count_objects(g: Grid) -> int:
+    return len(find_objects(g, by_color=True))
+
+
+def _count_color(g: Grid, c: int) -> int:
+    return sum(row.count(c) for row in g)
+
+
+def _count_distinct_colors(g: Grid) -> int:
+    return len(colors_in(g) - {0})
+
+
+def t_property_to_constant_grid(g: Grid, prop_fn, value_to_grid: dict) -> Grid | None:
+    """Compute prop_fn(g) and look up the corresponding output grid."""
+    v = prop_fn(g)
+    if v not in value_to_grid:
+        return None
+    return [row[:] for row in value_to_grid[v]]
 
 
 def t_count_color_to_grid(g: Grid, color: int, output_color: int) -> Grid:
@@ -1104,6 +1173,40 @@ def _constant_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def _property_to_output_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """If outputs vary across training pairs but each output corresponds to a
+    distinct value of some scalar property of the input (count of objects,
+    count of a color, count of distinct colors), induce that property -> output
+    mapping. Useful for 'output a fixed grid encoding a count' tasks."""
+    progs: list[Program] = []
+    # Skip if all outputs are the same (handled by _constant_programs)
+    outputs = [tuple(tuple(r) for r in o) for _, o in train_pairs]
+    if len(set(outputs)) <= 1:
+        return progs
+
+    def try_property(name: str, fn):
+        nonlocal progs
+        value_to_grid: dict = {}
+        ok = True
+        for inp, out in train_pairs:
+            v = fn(inp)
+            if v in value_to_grid and value_to_grid[v] != out:
+                ok = False; break
+            value_to_grid[v] = [row[:] for row in out]
+        if ok and value_to_grid:
+            vg = {k: [row[:] for row in v] for k, v in value_to_grid.items()}
+            progs.append(Program(
+                f"prop_{name}_to_grid",
+                lambda g, vg=vg, fn=fn: t_property_to_constant_grid(g, fn, vg),
+            ))
+
+    try_property("object_count", _count_objects)
+    try_property("distinct_colors", _count_distinct_colors)
+    for col in range(0, 10):
+        try_property(f"count_color_{col}", lambda g, c=col: _count_color(g, c))
+    return progs
+
+
 def _color_permutation_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """Detect a color permutation (swap, cycle) that maps inputs to outputs."""
     progs: list[Program] = []
@@ -1182,6 +1285,12 @@ def _color_specific_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
             f"crop_to_color_{col}_bbox",
             lambda g, col=col: t_crop_to_color_bbox(g, col),
         ))
+        progs.append(Program(
+            f"extract_color_{col}_bbox_grid",
+            lambda g, col=col: t_extract_object_bbox_grid(g, col),
+        ))
+    progs.append(Program("extract_largest_object_bbox_grid", t_extract_largest_object_bbox_grid))
+    progs.append(Program("extract_non_majority_subgrid", t_extract_non_majority_subgrid))
     return progs
 
 
@@ -1298,6 +1407,72 @@ def _drawing_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def _diagonal_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        progs.append(Program("flip_diag_nw_se", t_flip_diag_nw_se))
+        progs.append(Program("flip_diag_ne_sw", t_flip_diag_ne_sw))
+    return progs
+
+
+def _line_drawing_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    # Detect "trigger color" (appears in input but the line might be a new color in output)
+    in_colors: set[int] = set()
+    new_colors: set[int] = set()
+    for inp, out in train_pairs:
+        in_colors.update(colors_in(inp))
+        new_colors.update(colors_in(out) - colors_in(inp))
+    in_colors.discard(0)
+    new_colors.discard(0)
+    # Also try using the same color as trigger
+    line_color_set = new_colors if new_colors else in_colors
+    for trig in in_colors:
+        for lc in line_color_set:
+            if trig == lc and lc not in new_colors:
+                continue
+            progs.append(Program(
+                f"draw_h_line_through_{trig}_color_{lc}",
+                lambda g, trig=trig, lc=lc: t_draw_horizontal_line_through_each_color(g, trig, lc),
+            ))
+            progs.append(Program(
+                f"draw_v_line_through_{trig}_color_{lc}",
+                lambda g, trig=trig, lc=lc: t_draw_vertical_line_through_each_color(g, trig, lc),
+            ))
+            progs.append(Program(
+                f"draw_cross_through_{trig}_color_{lc}",
+                lambda g, trig=trig, lc=lc: t_draw_cross_through_each_color(g, trig, lc),
+            ))
+            progs.append(Program(
+                f"connect_two_{trig}_color_{lc}",
+                lambda g, trig=trig, lc=lc: t_connect_two_points_of_color(g, trig, lc),
+            ))
+    return progs
+
+
+def _object_filter_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    # Keep-only-color-X: try each color that appears in any input
+    seen: set[int] = set()
+    for inp, _ in train_pairs:
+        seen.update(colors_in(inp))
+    seen.discard(0)
+    for col in seen:
+        progs.append(Program(f"keep_only_color_{col}", lambda g, col=col: t_keep_only_object_of_color(g, col)))
+    progs.append(Program("keep_only_isolated_cells", t_keep_only_isolated_cells))
+    progs.append(Program("remove_isolated_cells", t_remove_isolated_cells))
+    progs.append(Program("keep_non_rectangular_objects", t_keep_non_rectangular_objects))
+    # Top-3 rank picks
+    for rank in range(3):
+        progs.append(Program(f"keep_object_at_rank_{rank}_size", lambda g, r=rank: t_keep_object_at_rank(g, r, by="size")))
+        progs.append(Program(f"keep_object_at_rank_{rank}_area", lambda g, r=rank: t_keep_object_at_rank(g, r, by="area")))
+    return progs
+
+
 def _per_object_transform_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -1358,6 +1533,140 @@ def _detected_symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Pr
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
         return []
     return [Program("complete_detected_symmetry", t_complete_detected_symmetry)]
+
+
+def t_flip_diag_nw_se(g: Grid) -> Grid:
+    """Flip across NW-SE diagonal (transpose)."""
+    return t_transpose(g)
+
+
+def t_flip_diag_ne_sw(g: Grid) -> Grid:
+    """Flip across NE-SW diagonal (anti-transpose)."""
+    h, w = grid_dims(g)
+    return [[g[h - 1 - c][w - 1 - r] for c in range(w)] for r in range(h)]
+
+
+def t_draw_horizontal_line_through_each_color(g: Grid, color: int, line_color: int) -> Grid:
+    """For each row that contains `color`, fill the entire row with `line_color`
+    (preserving the original color cells)."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        if any(c == color for c in g[r]):
+            for c in range(w):
+                if out[r][c] == 0:
+                    out[r][c] = line_color
+    return out
+
+
+def t_draw_vertical_line_through_each_color(g: Grid, color: int, line_color: int) -> Grid:
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for c in range(w):
+        if any(g[r][c] == color for r in range(h)):
+            for r in range(h):
+                if out[r][c] == 0:
+                    out[r][c] = line_color
+    return out
+
+
+def t_draw_cross_through_each_color(g: Grid, color: int, line_color: int) -> Grid:
+    """Draw both row and column lines through every cell of `color`."""
+    out = t_draw_horizontal_line_through_each_color(g, color, line_color)
+    return t_draw_vertical_line_through_each_color(out, color, line_color)
+
+
+def t_connect_two_points_of_color(g: Grid, color: int, line_color: int) -> Grid | None:
+    """If exactly two cells of `color` exist, draw a straight line (horizontal,
+    vertical, or 45-degree diagonal) connecting them."""
+    h, w = grid_dims(g)
+    pts = [(r, c) for r in range(h) for c in range(w) if g[r][c] == color]
+    if len(pts) != 2:
+        return None
+    (r1, c1), (r2, c2) = pts
+    dr = r2 - r1; dc = c2 - c1
+    if dr == 0 or dc == 0 or abs(dr) == abs(dc):
+        # straight line
+        out = grid_copy(g)
+        steps = max(abs(dr), abs(dc))
+        sr = (1 if dr > 0 else -1 if dr < 0 else 0)
+        sc = (1 if dc > 0 else -1 if dc < 0 else 0)
+        for i in range(1, steps):
+            r = r1 + i * sr; c = c1 + i * sc
+            if 0 <= r < h and 0 <= c < w and out[r][c] == 0:
+                out[r][c] = line_color
+        return out
+    return None
+
+
+def t_keep_only_object_of_color(g: Grid, color: int) -> Grid:
+    """Keep only the cells of `color`; clear everything else."""
+    return [[c if c == color else 0 for c in row] for row in g]
+
+
+def t_keep_only_isolated_cells(g: Grid) -> Grid | None:
+    """Keep cells whose 4-neighbors are all 0 (singletons by 4-connectivity)."""
+    h, w = grid_dims(g)
+    out = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == 0:
+                continue
+            isolated = True
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and g[nr][nc] != 0:
+                    isolated = False; break
+            if isolated:
+                out[r][c] = g[r][c]
+    return out
+
+
+def t_remove_isolated_cells(g: Grid) -> Grid | None:
+    """Inverse: keep cells that have at least one non-zero 4-neighbor."""
+    h, w = grid_dims(g)
+    out = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == 0:
+                continue
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and g[nr][nc] != 0:
+                    out[r][c] = g[r][c]; break
+    return out
+
+
+def t_keep_object_at_rank(g: Grid, rank: int, by: str = "size") -> Grid | None:
+    """Keep only the Nth-ranked object. rank=0 = largest, rank=1 = 2nd largest, etc.
+    by='size': by cell count. by='area': by bbox area."""
+    objs = find_objects(g, by_color=True)
+    if rank >= len(objs):
+        return None
+    if by == "size":
+        objs_sorted = sorted(objs, key=lambda o: -len(o["cells"]))
+    else:
+        objs_sorted = sorted(objs, key=lambda o: -((o["bbox"][2]-o["bbox"][0]+1)*(o["bbox"][3]-o["bbox"][1]+1)))
+    target = objs_sorted[rank]
+    h, w = grid_dims(g)
+    out = [[0] * w for _ in range(h)]
+    for r, c in target["cells"]:
+        out[r][c] = target["color"]
+    return out
+
+
+def t_keep_non_rectangular_objects(g: Grid) -> Grid | None:
+    """Keep only objects whose cells DON'T exactly fill their bbox (non-rectangles)."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    out = [[0] * w for _ in range(h)]
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        bbox_area = (r1 - r0 + 1) * (c1 - c0 + 1)
+        if len(o["cells"]) < bbox_area:
+            for r, c in o["cells"]:
+                out[r][c] = o["color"]
+    return out
 
 
 def _object_to_grid(o: dict) -> Grid:
@@ -1633,6 +1942,21 @@ def _ca_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     rule_k2 = _learn_ca_rule_k(train_pairs, k=2)
     if rule_k2 is not None:
         progs.append(Program("ca_rule_k2", lambda g, r=rule_k2: t_apply_ca_rule_k(g, r, k=2)))
+
+    # Iterated CA: apply the same simple rule N times. Useful for propagation
+    # patterns where one application moves a "boundary" by one cell.
+    rule_iter = _learn_ca_rule_by_color_count(train_pairs)
+    if rule_iter is not None:
+        for n in (2, 3, 5):
+            def apply_n(g, r=rule_iter, n=n):
+                cur = g
+                for _ in range(n):
+                    nxt = t_apply_ca_rule_count(cur, r)
+                    if nxt is None:
+                        return None
+                    cur = nxt
+                return cur
+            progs.append(Program(f"ca_rule_count_iter_{n}", apply_n))
     # Also learn a rule keyed only on the input color (no neighbors) — degenerate
     # to a pure color remap, but useful when the CA rules above fail because of
     # neighbor noise.
@@ -1658,6 +1982,20 @@ def _ca_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def _property_to_output_programs_constrained(train_pairs):
+    """Same as property-to-output but only fires when outputs are all small AND
+    the property values are all distinct (so the mapping is non-degenerate)."""
+    # Require all outputs to be at most 3x3
+    if not all(grid_dims(o)[0] <= 3 and grid_dims(o)[1] <= 3 for _, o in train_pairs):
+        return []
+    progs = _property_to_output_programs(train_pairs)
+    # Wrap each program: if test input's property value is NOT in the learned
+    # lookup, return None (so solver continues). This is the default behavior
+    # of t_property_to_constant_grid, so we're fine — but only fire on small
+    # outputs to limit false-positive risk.
+    return progs
+
+
 def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return (
         _constant_programs(train_pairs)
@@ -1678,6 +2016,10 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _drawing_programs(train_pairs)
         + _recolor_size_programs(train_pairs)
         + _per_object_transform_programs(train_pairs)
+        + _object_filter_programs(train_pairs)
+        + _diagonal_programs(train_pairs)
+        + _line_drawing_programs(train_pairs)
+        + _property_to_output_programs_constrained(train_pairs)  # LAST: high false-positive risk
     )
 
 
