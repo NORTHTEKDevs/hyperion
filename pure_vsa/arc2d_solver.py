@@ -3146,9 +3146,85 @@ def _candidate_passes_constraints(candidate_out: Grid, constraints: dict, test_i
     return True
 
 
-def _score_candidate(candidate_out: Grid, training_sigs) -> float:
-    """Legacy scorer (kept for old smart_rank)."""
+def _program_priority(prog_name: str) -> int:
+    """Higher = preferred when multiple programs match training.
+
+    Heuristic: prefer LEARNED primitives (parameters induced from training
+    data) over hand-coded geometric/fixed ops. Within learned, prefer more
+    specific over more general.
+    """
+    # Strong: programs that learn parameters from training
+    if prog_name.startswith("ca_rule_neighbor_sig"): return 100
+    if prog_name.startswith("ca_rule_neighbor_count"): return 95
+    if prog_name.startswith("ca_rule_k2"): return 90
+    if prog_name.startswith("per_cell_substitute"): return 88
+    if prog_name.startswith("recolor_map_"): return 85
+    if prog_name.startswith("recolor_by_length"): return 84
+    if prog_name.startswith("color_perm_"): return 83
+    if prog_name.startswith("recolor_each_object_by_rank_"): return 82
+    if prog_name.startswith("stamp_pattern_at_marker"): return 80
+
+    # Strong: pattern + structural
+    if prog_name.startswith("complete_tiled_pattern"): return 75
+    if prog_name.startswith("recolor_oe_"): return 72
+    if prog_name.startswith("recolor_longest_to_"): return 70
+    if prog_name.startswith("fill_between_"): return 68
+    if prog_name.startswith("recolor_non_majority_nonzero_to_"): return 66
+    if prog_name.startswith("split_overlay_"): return 65
+    if prog_name.startswith("four_quad_overlay_"): return 63
+
+    # Medium: object-level
+    if prog_name.startswith("keep_largest_object"): return 60
+    if prog_name.startswith("keep_smallest_object"): return 59
+    if prog_name.startswith("extract_unique_color_object"): return 58
+    if prog_name.startswith("extract_majority_subgrid"): return 57
+    if prog_name.startswith("extract_unique_subgrid"): return 56
+    if prog_name.startswith("crop_to_color_"): return 55
+    if prog_name.startswith("crop_to_largest_object"): return 54
+    if prog_name.startswith("crop_to_bbox"): return 53
+
+    # Medium: simple but data-derived
+    if prog_name.startswith("flood_fill_enclosed_"): return 50
+    if prog_name.startswith("recolor_objs_by_size_"): return 48
+    if prog_name.startswith("draw_bbox_frame_"): return 46
+    if prog_name.startswith("outline_objects_"): return 44
+
+    # Geometric (no parameter learning)
+    if prog_name == "complete_symmetry_h": return 35
+    if prog_name == "complete_symmetry_v": return 34
+    if prog_name == "complete_symmetry_both": return 33
+    if prog_name == "complete_detected_symmetry": return 32
+    if prog_name in ("flip_h", "flip_v", "rotate90", "rotate180", "rotate270", "transpose"): return 30
+    if prog_name.startswith("shift_"): return 28
+    if prog_name.startswith("gravity_"): return 25
+
+    # Recolor variants
+    if prog_name.startswith("recolor_"): return 22
+
+    # Generic / fallback
+    if prog_name == "identity": return 1
+    if prog_name.startswith("constant_output_"): return 5
+    if prog_name.startswith("prop_"): return 10  # property-to-output runs LAST anyway
+    if prog_name.startswith("compose:"): return 15
+    if prog_name.startswith("compose3:"): return 12
+
+    # Default for everything else
+    return 20
+
+
+def _score_candidate(candidate_out: Grid, training_sigs, prog_name: str = "") -> float:
+    """Score a candidate. Higher = better.
+
+    Combines: (a) program-family priority (learned > geometric),
+              (b) color set similarity to training outputs,
+              (c) non-zero density similarity.
+    """
     score = 0.0
+
+    # (a) Program priority (dominant factor)
+    score += _program_priority(prog_name) * 10.0  # weight = 10 so priorities dominate
+
+    # (b) + (c) Output similarity to training outputs
     cand_colors = frozenset(colors_in(candidate_out))
     cand_nz = sum(1 for row in candidate_out for c in row if c != 0)
     overlap_scores = []
@@ -3156,7 +3232,8 @@ def _score_candidate(candidate_out: Grid, training_sigs) -> float:
         if sig["colors"] or cand_colors:
             jac = len(cand_colors & sig["colors"]) / max(1, len(cand_colors | sig["colors"]))
             overlap_scores.append(jac)
-        diff = abs(cand_nz - sig["n_nonzero"]) / max(1, max(cand_nz, sig["n_nonzero"]))
+        denom = max(1, max(cand_nz, sig["n_nonzero"]))
+        diff = abs(cand_nz - sig["n_nonzero"]) / denom
         overlap_scores.append(1.0 - diff)
     if overlap_scores:
         score += sum(overlap_scores) / len(overlap_scores)
@@ -3189,7 +3266,7 @@ def solve_task(task_data: dict, allow_compose: bool = True,
                 if len(candidates) >= 20:
                     break
         if candidates:
-            best = max(candidates, key=lambda pr: _score_candidate(pr[1], training_sigs))
+            best = max(candidates, key=lambda pr: _score_candidate(pr[1], training_sigs, pr[0].name))
             return best[0].name, best[1]
     else:
         # First-match-that-passes-constraints wins
