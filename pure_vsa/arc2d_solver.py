@@ -2967,8 +2967,157 @@ def _shape_relation(train_pairs) -> str:
     return "mixed"
 
 
+# ---------------------------------------------------------------------------
+# Approach 3 (sketch): scene-graph extraction + object-diff
+# ---------------------------------------------------------------------------
+
+def _scene(g: Grid) -> dict:
+    """Compute a scene description: list of objects with normalized shape sigs.
+
+    Returns: {
+      'dims': (h, w),
+      'objects': [
+         {'color': c, 'cells': frozenset((r,c)),
+          'bbox': (r0,c0,r1,c1),
+          'shape_sig': frozenset((dr,dc) normalized to bbox top-left),
+          'size': int}
+      ],
+      'bg_color': int (most common color),
+    }
+    """
+    h, w = grid_dims(g)
+    bg = _detect_background(g)
+    objs = find_objects(g, by_color=True)
+    enriched = []
+    for o in objs:
+        r0, c0, _, _ = o["bbox"]
+        sig = frozenset((r - r0, c - c0) for r, c in o["cells"])
+        enriched.append({
+            "color": o["color"],
+            "cells": frozenset(o["cells"]),
+            "bbox": o["bbox"],
+            "shape_sig": sig,
+            "size": len(o["cells"]),
+        })
+    return {"dims": (h, w), "objects": enriched, "bg_color": bg}
+
+
+def _diff_scenes(scene_in: dict, scene_out: dict) -> dict:
+    """Compare input scene to output scene; classify the transformation.
+
+    Returns: { 'transformation_type': str, 'details': dict }
+    Possible types:
+      - 'identity': scenes match exactly
+      - 'recolor_only': same shapes, recolored
+      - 'shape_unchanged_moved': same shapes, different positions
+      - 'one_to_one': bijection of input objects to output objects
+      - 'subset_kept': output objects are a subset of input objects
+      - 'objects_added': output has more objects than input
+      - 'objects_removed': fewer
+      - 'unclassified': none of the above
+    """
+    in_objs = scene_in["objects"]
+    out_objs = scene_out["objects"]
+    if len(in_objs) == len(out_objs):
+        # Check if shape_sigs match in some bijection
+        in_shapes = sorted(o["shape_sig"] for o in in_objs)
+        out_shapes = sorted(o["shape_sig"] for o in out_objs)
+        if in_shapes == out_shapes:
+            in_colors = sorted(o["color"] for o in in_objs)
+            out_colors = sorted(o["color"] for o in out_objs)
+            in_bboxes = sorted(o["bbox"] for o in in_objs)
+            out_bboxes = sorted(o["bbox"] for o in out_objs)
+            if in_colors == out_colors and in_bboxes == out_bboxes:
+                return {"transformation_type": "identity"}
+            if in_bboxes == out_bboxes:
+                return {"transformation_type": "recolor_only", "details": {"color_map": "TODO"}}
+            if in_colors == out_colors:
+                return {"transformation_type": "shape_unchanged_moved"}
+            return {"transformation_type": "one_to_one"}
+    if len(out_objs) < len(in_objs):
+        in_sigs = [o["shape_sig"] for o in in_objs]
+        out_sigs_set = set(o["shape_sig"] for o in out_objs)
+        if all(s in in_sigs for s in [o["shape_sig"] for o in out_objs]):
+            return {"transformation_type": "subset_kept"}
+        return {"transformation_type": "objects_removed"}
+    if len(out_objs) > len(in_objs):
+        return {"transformation_type": "objects_added"}
+    return {"transformation_type": "unclassified"}
+
+
+def _classify_task(train_pairs) -> dict:
+    """Compute the dominant transformation type across training pairs."""
+    from collections import Counter
+    types: list[str] = []
+    for inp, out in train_pairs:
+        si = _scene(inp); so = _scene(out)
+        if grid_dims(inp) != grid_dims(out):
+            types.append("shape_change")
+            continue
+        d = _diff_scenes(si, so)
+        types.append(d["transformation_type"])
+    c = Counter(types)
+    return {"types": types, "dominant": c.most_common(1)[0][0]}
+
+
+def _learn_output_constraints(train_pairs, test_inp):
+    """From training pairs, predict CONSTRAINTS the test output should satisfy.
+
+    Returns dict with possible fields:
+      - 'expected_dims': (h, w) if predictable from test_inp
+      - 'expected_colors': frozenset of colors that should be in output (or None)
+      - 'output_subset_of_input_colors': bool (output never adds colors)
+    """
+    constraints: dict = {}
+    test_h, test_w = grid_dims(test_inp)
+
+    # Detect dim relation: same / scale / fixed / function-of-input-dim
+    dim_relations: set[str] = set()
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if (hi, wi) == (ho, wo):
+            dim_relations.add("same")
+        elif hi > 0 and wi > 0 and ho % hi == 0 and wo % wi == 0:
+            dim_relations.add(f"scale_up_{ho//hi}_{wo//wi}")
+        elif ho > 0 and wo > 0 and hi % ho == 0 and wi % wo == 0:
+            dim_relations.add(f"scale_down_{hi//ho}_{wi//wo}")
+        elif (ho, wo) == (1, 1):
+            dim_relations.add("to_1x1")
+        else:
+            dim_relations.add(f"fixed_{ho}_{wo}")
+    if len(dim_relations) == 1:
+        rel = next(iter(dim_relations))
+        if rel == "same":
+            constraints["expected_dims"] = (test_h, test_w)
+        elif rel.startswith("scale_up_"):
+            kr, kc = map(int, rel.split("_")[2:])
+            constraints["expected_dims"] = (test_h * kr, test_w * kc)
+        elif rel.startswith("scale_down_"):
+            kr, kc = map(int, rel.split("_")[2:])
+            if test_h % kr == 0 and test_w % kc == 0:
+                constraints["expected_dims"] = (test_h // kr, test_w // kc)
+        elif rel == "to_1x1":
+            constraints["expected_dims"] = (1, 1)
+        elif rel.startswith("fixed_"):
+            h, w = map(int, rel.split("_")[1:])
+            constraints["expected_dims"] = (h, w)
+
+    # Detect color subset: output colors ⊆ input colors in EVERY training pair?
+    subset_holds = all(
+        colors_in(out) <= colors_in(inp) for inp, out in train_pairs
+    )
+    constraints["output_subset_of_input_colors"] = subset_holds
+
+    # Detect when output colors are CONSTANT across training pairs
+    out_color_sets = [colors_in(out) for _, out in train_pairs]
+    if len(set(frozenset(s) for s in out_color_sets)) == 1:
+        constraints["expected_colors"] = frozenset(out_color_sets[0])
+
+    return constraints
+
+
 def _expected_output_signature(train_pairs):
-    """Compute features of training outputs that any valid test output should also satisfy."""
+    """Legacy: compute features of training outputs (used by old smart_rank)."""
     sigs = []
     for inp, out in train_pairs:
         sigs.append({
@@ -2979,20 +3128,34 @@ def _expected_output_signature(train_pairs):
     return sigs
 
 
+def _candidate_passes_constraints(candidate_out: Grid, constraints: dict, test_inp: Grid) -> bool:
+    """Hard filter: candidate must satisfy learned constraints."""
+    if "expected_dims" in constraints:
+        if grid_dims(candidate_out) != constraints["expected_dims"]:
+            return False
+    if constraints.get("output_subset_of_input_colors"):
+        in_colors = colors_in(test_inp)
+        out_colors = colors_in(candidate_out)
+        # Allow 0 (background) always
+        if not (out_colors - {0}) <= in_colors:
+            return False
+    if "expected_colors" in constraints:
+        cand_colors = colors_in(candidate_out)
+        if cand_colors != constraints["expected_colors"]:
+            return False
+    return True
+
+
 def _score_candidate(candidate_out: Grid, training_sigs) -> float:
-    """Higher = better match to the training output signature."""
+    """Legacy scorer (kept for old smart_rank)."""
     score = 0.0
     cand_colors = frozenset(colors_in(candidate_out))
-    cand_dims = grid_dims(candidate_out)
     cand_nz = sum(1 for row in candidate_out for c in row if c != 0)
-    # Color overlap with training outputs
     overlap_scores = []
     for sig in training_sigs:
-        # Color jaccard
         if sig["colors"] or cand_colors:
             jac = len(cand_colors & sig["colors"]) / max(1, len(cand_colors | sig["colors"]))
             overlap_scores.append(jac)
-        # Non-zero count similarity
         diff = abs(cand_nz - sig["n_nonzero"]) / max(1, max(cand_nz, sig["n_nonzero"]))
         overlap_scores.append(1.0 - diff)
     if overlap_scores:
@@ -3000,7 +3163,8 @@ def _score_candidate(candidate_out: Grid, training_sigs) -> float:
     return score
 
 
-def solve_task(task_data: dict, allow_compose: bool = True, smart_rank: bool = False) -> tuple[str, Grid] | None:
+def solve_task(task_data: dict, allow_compose: bool = True,
+               smart_rank: bool = False, use_constraints: bool = True) -> tuple[str, Grid] | None:
     train = task_data.get("train", [])
     test = task_data.get("test", [])
     if not train or not test:
@@ -3010,28 +3174,30 @@ def solve_task(task_data: dict, allow_compose: bool = True, smart_rank: bool = F
 
     progs = candidate_programs(train_pairs)
 
+    # Learn output constraints from training pairs (Approach 2: backward filtering)
+    constraints = _learn_output_constraints(train_pairs, test_inp) if use_constraints else {}
+
     if smart_rank:
-        # Collect ALL programs that match training, then rank by output-signature
-        # similarity to training outputs. This catches cases where multiple
-        # programs match training but only one produces a valid-looking test
-        # output.
         training_sigs = _expected_output_signature(train_pairs)
         candidates = []
         for prog in progs:
             ok, result = _try_program(prog, train_pairs, test_inp)
             if ok and result is not None:
+                if constraints and not _candidate_passes_constraints(result, constraints, test_inp):
+                    continue
                 candidates.append((prog, result))
-                if len(candidates) >= 20:  # don't search forever
+                if len(candidates) >= 20:
                     break
         if candidates:
-            # Score and pick the best
             best = max(candidates, key=lambda pr: _score_candidate(pr[1], training_sigs))
             return best[0].name, best[1]
     else:
-        # First-match wins (original behavior)
+        # First-match-that-passes-constraints wins
         for prog in progs:
             ok, result = _try_program(prog, train_pairs, test_inp)
             if ok and result is not None:
+                if constraints and not _candidate_passes_constraints(result, constraints, test_inp):
+                    continue
                 return prog.name, result
 
     # Second pass: composition of two primitives prog_b(prog_a(g))
