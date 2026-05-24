@@ -1673,16 +1673,56 @@ def _alignment_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
 
 def _mask_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
-    # Only fires when output width is half the input width OR output height is half input height
+    # Determine the halving axis from training pairs
+    halving_axes: set[str] = set()
     for inp, out in train_pairs:
         hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
         if wo * 2 == wi and ho == hi:
-            progs.append(Program("mask_and_horizontal", t_mask_and))
-            progs.append(Program("mask_or_horizontal", t_mask_or))
-            progs.append(Program("mask_xor_horizontal", t_mask_xor))
-            break
-        if ho * 2 == hi and wo == wi:
-            progs.append(Program("mask_and_vertical", t_mask_and_vertical))
+            halving_axes.add("h")
+        elif ho * 2 == hi and wo == wi:
+            halving_axes.add("v")
+    # Detect a "recolor target" — color that appears in output but not as a
+    # plain overlay of input halves
+    new_colors: set[int] = {0}
+    for _, out in train_pairs:
+        new_colors.update(colors_in(out))
+    for axis in halving_axes:
+        for mode in ("or", "and", "xor"):
+            progs.append(Program(
+                f"split_overlay_{axis}_{mode}",
+                lambda g, axis=axis, mode=mode: t_split_grid_overlay(g, axis, mode),
+            ))
+            # Also try with each candidate recolor
+            for nc in new_colors:
+                if nc == 0:
+                    continue
+                progs.append(Program(
+                    f"split_overlay_{axis}_{mode}_recolor_{nc}",
+                    lambda g, axis=axis, mode=mode, nc=nc: t_split_grid_overlay(g, axis, mode, recolor=nc),
+                ))
+    # Keep the old explicit overlays too
+    if "h" in halving_axes:
+        progs.append(Program("mask_and_horizontal", t_mask_and))
+        progs.append(Program("mask_or_horizontal", t_mask_or))
+        progs.append(Program("mask_xor_horizontal", t_mask_xor))
+    if "v" in halving_axes:
+        progs.append(Program("mask_and_vertical", t_mask_and_vertical))
+    # 4-quadrant overlay: output is 1/4 size in both dimensions
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if ho * 2 == hi and wo * 2 == wi:
+            for mode in ("or", "and", "xor"):
+                progs.append(Program(
+                    f"four_quad_overlay_{mode}",
+                    lambda g, mode=mode: t_four_quadrant_overlay(g, mode),
+                ))
+                for nc in new_colors:
+                    if nc == 0:
+                        continue
+                    progs.append(Program(
+                        f"four_quad_overlay_{mode}_recolor_{nc}",
+                        lambda g, mode=mode, nc=nc: t_four_quadrant_overlay(g, mode, recolor=nc),
+                    ))
             break
     return progs
 
@@ -2139,6 +2179,72 @@ def t_stamp_pattern_at_marker(g: Grid, marker_color: int, pattern: dict[tuple[in
         if 0 <= nr < h and 0 <= nc < w:
             out[nr][nc] = color
     return out
+
+
+def t_overlay_grids(a: Grid, b: Grid, mode: str = "or") -> Grid | None:
+    """Stack two equally-shaped grids, with one of (or, and, xor) semantics."""
+    if grid_dims(a) != grid_dims(b):
+        return None
+    h, w = grid_dims(a)
+    out: Grid = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            av, bv = a[r][c], b[r][c]
+            if mode == "or":
+                out[r][c] = av if av != 0 else bv
+            elif mode == "and":
+                if av != 0 and bv != 0:
+                    out[r][c] = av
+            elif mode == "xor":
+                if (av != 0) != (bv != 0):
+                    out[r][c] = av if av != 0 else bv
+    return out
+
+
+def t_four_quadrant_overlay(g: Grid, mode: str, recolor: int | None = None) -> Grid | None:
+    """Split grid into 4 quadrants (split both H and V), overlay all four."""
+    h, w = grid_dims(g)
+    if h % 2 != 0 or w % 2 != 0:
+        return None
+    hh, hw = h // 2, w // 2
+    quads = [
+        [row[:hw] for row in g[:hh]],
+        [row[hw:] for row in g[:hh]],
+        [row[:hw] for row in g[hh:]],
+        [row[hw:] for row in g[hh:]],
+    ]
+    result = quads[0]
+    for q in quads[1:]:
+        result = t_overlay_grids(result, q, mode)
+        if result is None:
+            return None
+    if recolor is None:
+        return result
+    return [[recolor if c != 0 else 0 for c in row] for row in result]
+
+
+def t_split_grid_overlay(g: Grid, axis: str, mode: str, recolor: int | None = None) -> Grid | None:
+    """Split grid into two halves along axis, overlay them with given mode.
+    Optionally recolor any non-zero in result to `recolor`."""
+    h, w = grid_dims(g)
+    if axis == "h":
+        if w % 2 != 0:
+            return None
+        half = w // 2
+        a = [row[:half] for row in g]
+        b = [row[half:] for row in g]
+    elif axis == "v":
+        if h % 2 != 0:
+            return None
+        half = h // 2
+        a = g[:half]
+        b = g[half:]
+    else:
+        return None
+    result = t_overlay_grids(a, b, mode)
+    if result is None or recolor is None:
+        return result
+    return [[recolor if c != 0 else 0 for c in row] for row in result]
 
 
 def t_recolor_smallest_object(g: Grid, new_color: int) -> Grid | None:
@@ -2678,24 +2784,30 @@ def _input_features(g: Grid) -> dict:
 
 
 def _shape_relation(train_pairs) -> str:
-    """Classify train pairs' input vs output shape relationship."""
+    """Classify train pairs' input vs output shape relationship.
+    Returns one of: 'same', 'scale_up', 'scale_down', 'to_1x1', 'bigger', 'smaller', 'mixed'."""
     if not train_pairs:
         return "unknown"
-    sample_in, sample_out = train_pairs[0]
-    hi, wi = grid_dims(sample_in); ho, wo = grid_dims(sample_out)
-    if (hi, wi) == (ho, wo):
-        return "same"
-    if ho > hi or wo > wi:
-        if hi > 0 and wi > 0 and ho % hi == 0 and wo % wi == 0:
-            return "scale_up"
-        return "bigger"
-    if ho < hi or wo < wi:
-        if ho > 0 and wo > 0 and hi % ho == 0 and wi % wo == 0:
-            return "scale_down"
-        if (ho, wo) == (1, 1):
-            return "to_1x1"
-        return "smaller"
-    return "same"
+    relations = set()
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if (hi, wi) == (ho, wo):
+            relations.add("same")
+        elif (ho, wo) == (1, 1):
+            relations.add("to_1x1")
+        elif ho > hi or wo > wi:
+            if hi > 0 and wi > 0 and ho % hi == 0 and wo % wi == 0:
+                relations.add("scale_up")
+            else:
+                relations.add("bigger")
+        elif ho < hi or wo < wi:
+            if ho > 0 and wo > 0 and hi % ho == 0 and wi % wo == 0:
+                relations.add("scale_down")
+            else:
+                relations.add("smaller")
+    if len(relations) == 1:
+        return next(iter(relations))
+    return "mixed"
 
 
 def solve_task(task_data: dict, allow_compose: bool = True) -> tuple[str, Grid] | None:
