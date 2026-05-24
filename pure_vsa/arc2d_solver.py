@@ -1620,6 +1620,18 @@ def _rank_recolor_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     return progs
 
 
+def _marker_pattern_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    info = _learn_marker_pattern(train_pairs)
+    if info is not None:
+        mc, pattern = info
+        progs.append(Program(
+            f"stamp_pattern_at_marker_{mc}",
+            lambda g, mc=mc, p=pattern: t_stamp_pattern_at_marker(g, mc, p),
+        ))
+    return progs
+
+
 def _noise_removal_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -1633,6 +1645,17 @@ def _noise_removal_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progra
         progs.append(Program(f"remove_color_{col}", lambda g, col=col: t_remove_objects_by_color(g, col)))
     progs.append(Program("keep_largest_of_each_color", t_keep_only_largest_object_of_each_color))
     progs.append(Program("remove_noise_singletons", t_remove_noise_singletons))
+
+    # Recolor isolated cells / grouped cells to learned color
+    new_colors: set[int] = set()
+    for inp, out in train_pairs:
+        new_colors.update(colors_in(out) - colors_in(inp))
+    for nc in new_colors:
+        progs.append(Program(f"recolor_isolated_to_{nc}", lambda g, nc=nc: t_recolor_isolated_cells(g, nc)))
+        progs.append(Program(f"recolor_grouped_to_{nc}", lambda g, nc=nc: t_recolor_groups_keep_isolated(g, nc)))
+        progs.append(Program(f"recolor_smallest_to_{nc}", lambda g, nc=nc: t_recolor_smallest_object(g, nc)))
+        progs.append(Program(f"recolor_largest_to_{nc}", lambda g, nc=nc: t_recolor_largest_object(g, nc)))
+        progs.append(Program(f"recolor_unique_size_to_{nc}", lambda g, nc=nc: t_recolor_unique_size_object(g, nc)))
     return progs
 
 
@@ -2060,6 +2083,137 @@ def t_keep_only_largest_object_of_each_color(g: Grid) -> Grid | None:
     return out
 
 
+def _learn_marker_pattern(train_pairs: list[tuple[Grid, Grid]]):
+    """If each training input has exactly one cell of some 'marker' color, and
+    the output has a fixed offset pattern of cells around it, learn that pattern.
+    Returns (marker_color, pattern_offsets) or None.
+    pattern_offsets is a dict {(dr, dc): color}."""
+    marker_color = None
+    pattern: dict[tuple[int, int], int] | None = None
+
+    for inp, out in train_pairs:
+        if grid_dims(inp) != grid_dims(out):
+            return None
+        # Find the cell that's in input AND in output and is the marker
+        # First, find what color appears EXACTLY ONCE in input
+        from collections import Counter
+        ic = Counter(v for row in inp for v in row if v != 0)
+        singletons = [c for c, n in ic.items() if n == 1]
+        if len(singletons) != 1:
+            return None
+        m_color = singletons[0]
+        if marker_color is None:
+            marker_color = m_color
+        elif marker_color != m_color:
+            return None
+        # Find marker position
+        h, w = grid_dims(inp)
+        mr, mc = next((r, c) for r in range(h) for c in range(w) if inp[r][c] == m_color)
+        # Compute offsets: cells in output that DIFFER from input
+        this_pattern: dict[tuple[int, int], int] = {}
+        for r in range(h):
+            for c in range(w):
+                if out[r][c] != inp[r][c]:
+                    this_pattern[(r - mr, c - mc)] = out[r][c]
+        if pattern is None:
+            pattern = this_pattern
+        elif pattern != this_pattern:
+            return None
+    if pattern is None or marker_color is None:
+        return None
+    return (marker_color, pattern)
+
+
+def t_stamp_pattern_at_marker(g: Grid, marker_color: int, pattern: dict[tuple[int, int], int]) -> Grid | None:
+    """Find the unique marker cell, stamp the learned pattern at offsets from it."""
+    h, w = grid_dims(g)
+    from collections import Counter
+    c = Counter(v for row in g for v in row if v != 0)
+    singletons = [k for k, n in c.items() if n == 1]
+    if marker_color not in singletons:
+        return None
+    mr, mc = next((r, c) for r in range(h) for c in range(w) if g[r][c] == marker_color)
+    out = grid_copy(g)
+    for (dr, dc), color in pattern.items():
+        nr, nc = mr + dr, mc + dc
+        if 0 <= nr < h and 0 <= nc < w:
+            out[nr][nc] = color
+    return out
+
+
+def t_recolor_smallest_object(g: Grid, new_color: int) -> Grid | None:
+    """Recolor the smallest connected object to new_color, leave others."""
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    smallest = min(objs, key=lambda o: len(o["cells"]))
+    out = grid_copy(g)
+    for r, c in smallest["cells"]:
+        out[r][c] = new_color
+    return out
+
+
+def t_recolor_largest_object(g: Grid, new_color: int) -> Grid | None:
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    largest = max(objs, key=lambda o: len(o["cells"]))
+    out = grid_copy(g)
+    for r, c in largest["cells"]:
+        out[r][c] = new_color
+    return out
+
+
+def t_recolor_unique_size_object(g: Grid, new_color: int) -> Grid | None:
+    """Recolor the object whose size is unique (only one object of that size)."""
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    from collections import Counter
+    size_counts = Counter(len(o["cells"]) for o in objs)
+    uniques = [o for o in objs if size_counts[len(o["cells"])] == 1]
+    if len(uniques) != 1:
+        return None
+    out = grid_copy(g)
+    for r, c in uniques[0]["cells"]:
+        out[r][c] = new_color
+    return out
+
+
+def t_recolor_isolated_cells(g: Grid, new_color: int) -> Grid:
+    """Recolor cells that have no non-zero 4-neighbor (singletons) to new_color."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == 0:
+                continue
+            isolated = True
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and g[nr][nc] != 0:
+                    isolated = False; break
+            if isolated:
+                out[r][c] = new_color
+    return out
+
+
+def t_recolor_groups_keep_isolated(g: Grid, new_color: int) -> Grid:
+    """Inverse: recolor cells that have at least one non-zero 4-neighbor to new_color."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == 0:
+                continue
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and g[nr][nc] != 0:
+                    out[r][c] = new_color
+                    break
+    return out
+
+
 def t_remove_noise_singletons(g: Grid) -> Grid:
     """Remove isolated cells (no 4-neighbor of any color), keep larger objects."""
     h, w = grid_dims(g)
@@ -2476,6 +2630,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _mask_programs(train_pairs)
         + _alignment_programs(train_pairs)
         + _noise_removal_programs(train_pairs)
+        + _marker_pattern_programs(train_pairs)
         + _per_object_transform_programs(train_pairs)
         + _object_filter_programs(train_pairs)
         + _diagonal_programs(train_pairs)
@@ -2488,18 +2643,59 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
 def _try_program(prog: Program, train_pairs, test_inp):
     """Return (matches_all_training, test_output) — both None on exception."""
     try:
-        outputs = []
-        for inp, out in train_pairs:
+        # Early termination: check the FIRST training pair first; if it fails,
+        # skip the rest. This is the hot path — most programs fail on the first
+        # check.
+        first_inp, first_out = train_pairs[0]
+        r0 = prog.apply(first_inp)
+        if r0 is None or not grid_equal(r0, first_out):
+            return False, None
+        # Check the rest
+        for inp, out in train_pairs[1:]:
             r = prog.apply(inp)
             if r is None or not grid_equal(r, out):
                 return False, None
-            outputs.append(r)
         test_r = prog.apply(test_inp)
         if test_r is None:
             return True, None
         return True, test_r
     except Exception:
         return False, None
+
+
+def _input_features(g: Grid) -> dict:
+    """Compute features used to prioritize which program families to try."""
+    h, w = grid_dims(g)
+    colors = colors_in(g)
+    objs = find_objects(g, by_color=True) if h * w < 900 else []  # skip for huge grids
+    return {
+        "h": h, "w": w, "n_cells": h * w,
+        "n_colors": len(colors), "n_nonzero_colors": len(colors - {0}),
+        "n_objects": len(objs),
+        "is_square": h == w,
+        "has_zero": 0 in colors,
+    }
+
+
+def _shape_relation(train_pairs) -> str:
+    """Classify train pairs' input vs output shape relationship."""
+    if not train_pairs:
+        return "unknown"
+    sample_in, sample_out = train_pairs[0]
+    hi, wi = grid_dims(sample_in); ho, wo = grid_dims(sample_out)
+    if (hi, wi) == (ho, wo):
+        return "same"
+    if ho > hi or wo > wi:
+        if hi > 0 and wi > 0 and ho % hi == 0 and wo % wi == 0:
+            return "scale_up"
+        return "bigger"
+    if ho < hi or wo < wi:
+        if ho > 0 and wo > 0 and hi % ho == 0 and wi % wo == 0:
+            return "scale_down"
+        if (ho, wo) == (1, 1):
+            return "to_1x1"
+        return "smaller"
+    return "same"
 
 
 def solve_task(task_data: dict, allow_compose: bool = True) -> tuple[str, Grid] | None:
