@@ -1590,6 +1590,17 @@ def _object_filter_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progra
     return progs
 
 
+def _object_overlay_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Overlay all same-shape objects in input into a single output."""
+    progs: list[Program] = []
+    for mode in ("or", "and", "xor"):
+        progs.append(Program(
+            f"overlay_objects_{mode}",
+            lambda g, mode=mode: t_overlay_objects(g, mode),
+        ))
+    return progs
+
+
 def _per_object_transform_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2181,6 +2192,47 @@ def t_stamp_pattern_at_marker(g: Grid, marker_color: int, pattern: dict[tuple[in
     return out
 
 
+def t_overlay_objects(g: Grid, mode: str = "or") -> Grid | None:
+    """Find all objects with the same bbox shape; overlay them onto a canvas
+    of that shape using the given mode."""
+    objs = find_objects(g, by_color=True)
+    if len(objs) < 2:
+        return None
+    # Group by bbox shape
+    shapes: dict[tuple[int, int], list[dict]] = {}
+    for o in objs:
+        shapes.setdefault(_object_bbox_shape(o), []).append(o)
+    # Find the shape with the most instances
+    best = max(shapes.items(), key=lambda kv: len(kv[1]))
+    shape, group = best
+    if len(group) < 2:
+        return None
+    sh, sw = shape
+    canvas: Grid = [[0] * sw for _ in range(sh)]
+    for o in group:
+        r0, c0, _, _ = o["bbox"]
+        for r, c in o["cells"]:
+            dr = r - r0; dc = c - c0
+            cur = canvas[dr][dc]
+            if mode == "or":
+                if cur == 0:
+                    canvas[dr][dc] = o["color"]
+            elif mode == "and":
+                # Mark cells present in ALL members
+                pass
+            elif mode == "xor":
+                canvas[dr][dc] = 0 if cur != 0 else o["color"]
+    if mode == "and":
+        # Recompute: a cell is set only if every group object has a cell there
+        for r in range(sh):
+            for c in range(sw):
+                if all((r + o["bbox"][0], c + o["bbox"][1]) in o["cells"] for o in group):
+                    canvas[r][c] = group[0]["color"]
+                else:
+                    canvas[r][c] = 0
+    return canvas
+
+
 def t_overlay_grids(a: Grid, b: Grid, mode: str = "or") -> Grid | None:
     """Stack two equally-shaped grids, with one of (or, and, xor) semantics."""
     if grid_dims(a) != grid_dims(b):
@@ -2734,6 +2786,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _background_programs(train_pairs)
         + _radial_symmetry_programs(train_pairs)
         + _mask_programs(train_pairs)
+        + _object_overlay_programs(train_pairs)
         + _alignment_programs(train_pairs)
         + _noise_removal_programs(train_pairs)
         + _marker_pattern_programs(train_pairs)
