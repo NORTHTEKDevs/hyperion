@@ -650,6 +650,24 @@ def _selection_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs.append(Program("replace_unique_with_majority", t_replace_unique_color_with_majority))
     progs.append(Program("replace_unique_with_minority", t_replace_unique_color_with_minority))
     progs.append(Program("keep_only_unique_color", t_only_keep_unique_color))
+
+    # Per-row uniform-color detector: try all (uniform_color, nonuniform_color) pairs
+    # induced from training output colors
+    out_colors: set[int] = set()
+    for _, out in train_pairs:
+        out_colors.update(colors_in(out))
+    for uc in out_colors:
+        for nc in out_colors:
+            if uc == nc:
+                continue
+            progs.append(Program(
+                f"per_row_uniform_{uc}_other_{nc}",
+                lambda g, uc=uc, nc=nc: t_per_row_uniform_to_color(g, uc, nc),
+            ))
+            progs.append(Program(
+                f"per_col_uniform_{uc}_other_{nc}",
+                lambda g, uc=uc, nc=nc: t_per_col_uniform_to_color(g, uc, nc),
+            ))
     return progs
 
 
@@ -711,26 +729,29 @@ def t_keep_only_color_mask(g: Grid, color: int, replace_with: int) -> Grid:
 
 
 def _detect_grid_dividers(g: Grid) -> tuple[list[int], list[int], int] | None:
-    """Detect rows/cols that are uniformly filled with a single non-zero color
-    (acting as grid dividers). Returns (divider_rows, divider_cols, color) or None.
-    Requires at least one divider row OR column."""
+    """Detect rows/cols that are uniformly filled with a single color (acting
+    as grid dividers). Returns (divider_rows, divider_cols, color) or None.
+    Requires at least one divider row OR column AND the divider must not be
+    the entire grid (otherwise everything is trivially a divider)."""
     h, w = grid_dims(g)
     if h < 3 or w < 3:
         return None
-    # Find a candidate divider color: one that fills entire rows or entire cols.
     candidates: dict[int, tuple[list[int], list[int]]] = {}
-    for color in range(1, 10):
+    for color in range(0, 10):
         rows = [r for r in range(h) if all(g[r][c] == color for c in range(w))]
         cols = [c for c in range(w) if all(g[r][c] == color for r in range(h))]
         if rows or cols:
             candidates[color] = (rows, cols)
     if not candidates:
         return None
-    # Pick the color with the most dividers
-    color = max(candidates, key=lambda k: len(candidates[k][0]) + len(candidates[k][1]))
-    rows, cols = candidates[color]
-    if not rows and not cols:
+    # Pick the color whose divider count is most distinctive (excluding cases
+    # where the divider fills MOST of the grid — then it's just a background).
+    valid = {col: (rs, cs) for col, (rs, cs) in candidates.items()
+             if (len(rs) + len(cs)) < (h + w) - 1 and (rs or cs)}
+    if not valid:
         return None
+    color = max(valid, key=lambda k: len(valid[k][0]) + len(valid[k][1]))
+    rows, cols = valid[color]
     return rows, cols, color
 
 
@@ -1041,6 +1062,16 @@ def t_per_row_uniform_to_color(g: Grid, uniform_color: int, nonuniform_color: in
     return out
 
 
+def t_per_col_uniform_to_color(g: Grid, uniform_color: int, nonuniform_color: int) -> Grid:
+    h, w = grid_dims(g)
+    cols_uniform = []
+    for c in range(w):
+        nonzero = [g[r][c] for r in range(h) if g[r][c] != 0]
+        all_same = len(set(nonzero)) <= 1 and len(nonzero) > 0
+        cols_uniform.append(all_same)
+    return [[(uniform_color if cols_uniform[c] else nonuniform_color) for c in range(w)] for _ in range(h)]
+
+
 def _constant_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """If all training outputs are identical, output that constant grid."""
     progs: list[Program] = []
@@ -1243,6 +1274,9 @@ def _drawing_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     for col in new_colors:
         progs.append(Program(f"draw_bbox_frame_{col}", lambda g, col=col: t_draw_bbox_frame(g, col)))
         progs.append(Program(f"outline_objects_{col}", lambda g, col=col: t_outline_objects(g, col)))
+        progs.append(Program(f"rectangulate_objects_{col}", lambda g, col=col: t_rectangulate_each_object(g, col)))
+    progs.append(Program("fill_each_object_bbox", t_fill_each_object_bbox))
+    progs.append(Program("keep_only_rectangular_objects", t_keep_only_rectangular_objects))
     return progs
 
 
@@ -1290,6 +1324,52 @@ def _detected_symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Pr
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
         return []
     return [Program("complete_detected_symmetry", t_complete_detected_symmetry)]
+
+
+def t_fill_each_object_bbox(g: Grid) -> Grid | None:
+    """For each connected object, fill its bbox with the object's color."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = grid_copy(g)
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                out[r][c] = o["color"]
+    return out
+
+
+def t_rectangulate_each_object(g: Grid, fill_color: int) -> Grid | None:
+    """Replace each object with its bbox filled with fill_color."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = [[0] * w for _ in range(h)]
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                out[r][c] = fill_color
+    return out
+
+
+def t_keep_only_rectangular_objects(g: Grid) -> Grid | None:
+    """Keep only objects whose cells exactly fill their bbox (perfect rectangles)."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = [[0] * w for _ in range(h)]
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        bbox_area = (r1 - r0 + 1) * (c1 - c0 + 1)
+        if len(o["cells"]) == bbox_area:
+            for r, c in o["cells"]:
+                out[r][c] = o["color"]
+    return out
 
 
 def t_draw_bbox_frame(g: Grid, frame_color: int) -> Grid:
@@ -1420,6 +1500,43 @@ def t_extract_tile(g: Grid) -> Grid | None:
     return [[tile.get((r, c), 0) for c in range(pw)] for r in range(ph)]
 
 
+def _learn_ca_rule_k(train_pairs: list[tuple[Grid, Grid]], k: int):
+    """CA rule with neighborhood radius k."""
+    rule: dict[tuple, int] = {}
+    for inp, out in train_pairs:
+        if grid_dims(inp) != grid_dims(out):
+            return None
+        h, w = grid_dims(inp)
+        for r in range(h):
+            for c in range(w):
+                key = (inp[r][c], _neighbor_signature(inp, r, c, k=k))
+                val = out[r][c]
+                if key in rule and rule[key] != val:
+                    return None
+                rule[key] = val
+    return rule
+
+
+def t_apply_ca_rule_k(g: Grid, rule: dict[tuple, int], k: int) -> Grid | None:
+    h, w = grid_dims(g)
+    out: Grid = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            key = (g[r][c], _neighbor_signature(g, r, c, k=k))
+            if key not in rule:
+                return None
+            out[r][c] = rule[key]
+    return out
+
+
+def _learn_ca_rule_iterated(train_pairs: list[tuple[Grid, Grid]], n_iter: int):
+    """Apply the CA rule n_iter times. Useful when the rule needs propagation."""
+    rule = _learn_ca_rule(train_pairs)
+    if rule is None:
+        return None
+    return rule, n_iter
+
+
 def _ca_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     rule = _learn_ca_rule(train_pairs)
@@ -1428,6 +1545,11 @@ def _ca_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     rule_c = _learn_ca_rule_by_color_count(train_pairs)
     if rule_c is not None:
         progs.append(Program("ca_rule_neighbor_count", lambda g, r=rule_c: t_apply_ca_rule_count(g, r)))
+    # k=2 (5x5 window) — much more specific, less likely to overfit on training
+    # but catches finer-grained local patterns.
+    rule_k2 = _learn_ca_rule_k(train_pairs, k=2)
+    if rule_k2 is not None:
+        progs.append(Program("ca_rule_k2", lambda g, r=rule_k2: t_apply_ca_rule_k(g, r, k=2)))
     # Also learn a rule keyed only on the input color (no neighbors) — degenerate
     # to a pure color remap, but useful when the CA rules above fail because of
     # neighbor noise.

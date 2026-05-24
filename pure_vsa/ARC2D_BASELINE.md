@@ -1,6 +1,6 @@
 # 2D ARC-AGI baseline
 
-**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~90-primitive library + composition + cellular-automaton rule induction, reaches **10.25% on the public training set (41 / 400)** and **1.25% on the held-out evaluation set (5 / 400)**.
+**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~100-primitive library + composition + cellular-automaton rule induction, reaches **11.00% on the public training set (44 / 400)** and **1.25% on the held-out evaluation set (5 / 400)**.
 
 This is a baseline, not a flagship. The point is to establish that the *mechanism* works on 2D and to measure how far an honest primitive library + composition gets you without specialized search heuristics.
 
@@ -18,7 +18,8 @@ This is a baseline, not a flagship. The point is to establish that the *mechanis
 | 8. + fill-with-majority/minority-color (whole grid) | ~60 | **8.75% (35/400)** | **0.75% (3/400)** |
 | 9. + subgrid decomposition, detected-symmetry, 3-step composition, hole-fill | ~75 | 8.75% (35/400) | 0.75% (3/400) |
 | 10. + cellular-automaton rule induction (neighbor signature, neighbor count) | ~78 | 9.75% (39/400) | 0.75% (3/400) |
-| 11. + tiled-pattern completion, drawing/outline primitives, size-recolor, color permutation | ~90 | **10.25% (41/400)** | **1.25% (5/400)** |
+| 11. + tiled-pattern completion, drawing/outline primitives, size-recolor, color permutation | ~90 | 10.25% (41/400) | 1.25% (5/400) |
+| 12. + color-0-divider support, per-row/col uniformity, rectangle/bbox-fill, larger CA window | ~100 | **11.00% (44/400)** | **1.25% (5/400)** |
 
 **Plateau broken at iteration 10** by the CA-rule induction primitive (the first one that actually learns a per-cell transformation from training data instead of being a hand-coded geometric op). It's the most general primitive in the library and unlocked patterns the geometric primitives couldn't reach.
 
