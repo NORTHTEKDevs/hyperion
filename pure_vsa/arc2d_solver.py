@@ -734,6 +734,30 @@ def t_extract_object_bbox_grid(g: Grid, color: int) -> Grid | None:
     return [row[min_c:max_c + 1] for row in g[min_r:max_r + 1]]
 
 
+def t_extract_unique_color_object_bbox(g: Grid) -> Grid | None:
+    """Find the object whose color is unique (appears only once across objects),
+    crop to its bbox content."""
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    from collections import Counter
+    color_counts = Counter(o["color"] for o in objs)
+    uniques = [o for o in objs if color_counts[o["color"]] == 1]
+    if len(uniques) != 1:
+        return None
+    r0, c0, r1, c1 = uniques[0]["bbox"]
+    return [row[c0:c1 + 1] for row in g[r0:r1 + 1]]
+
+
+def t_extract_smallest_object_bbox_grid(g: Grid) -> Grid | None:
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    smallest = min(objs, key=lambda o: len(o["cells"]))
+    r0, c0, r1, c1 = smallest["bbox"]
+    return [row[c0:c1 + 1] for row in g[r0:r1 + 1]]
+
+
 def t_extract_largest_object_bbox_grid(g: Grid) -> Grid | None:
     """Crop to the bbox of the largest connected object (returning the bbox area including
     any non-object cells inside the bbox)."""
@@ -1353,6 +1377,8 @@ def _color_specific_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
             lambda g, col=col: t_extract_object_bbox_grid(g, col),
         ))
     progs.append(Program("extract_largest_object_bbox_grid", t_extract_largest_object_bbox_grid))
+    progs.append(Program("extract_smallest_object_bbox_grid", t_extract_smallest_object_bbox_grid))
+    progs.append(Program("extract_unique_color_object_bbox", t_extract_unique_color_object_bbox))
     progs.append(Program("extract_non_majority_subgrid", t_extract_non_majority_subgrid))
     return progs
 
@@ -1577,6 +1603,33 @@ def _per_object_transform_programs(train_pairs: list[tuple[Grid, Grid]]) -> list
         ("per_obj_transpose", t_transpose),
     ]:
         progs.append(Program(name, lambda g, fn=fn: t_per_object_transform(g, fn)))
+    return progs
+
+
+def _rank_recolor_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    mapping = _learn_rank_to_color(train_pairs)
+    if mapping is not None:
+        m = dict(mapping)
+        progs.append(Program(
+            f"recolor_each_object_by_rank_{sorted(m.items())}",
+            lambda g, m=m: t_recolor_each_object_by_rank(g, m),
+        ))
+    return progs
+
+
+def _background_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    new_colors: set[int] = set()
+    for inp, out in train_pairs:
+        new_colors.update(colors_in(out) - colors_in(inp))
+    for nc in new_colors:
+        progs.append(Program(f"recolor_background_to_{nc}", lambda g, nc=nc: t_recolor_background(g, nc)))
+    progs.append(Program("invert_background", t_invert_background))
     return progs
 
 
@@ -1931,6 +1984,72 @@ def t_outline_objects(g: Grid, outline_color: int) -> Grid:
     return out
 
 
+def _detect_background(g: Grid) -> int:
+    """Most common color, treated as background."""
+    from collections import Counter
+    c = Counter(v for row in g for v in row)
+    if not c:
+        return 0
+    return c.most_common(1)[0][0]
+
+
+def t_recolor_background(g: Grid, new_bg: int) -> Grid:
+    """Recolor the (auto-detected) background to new_bg, keep others."""
+    bg = _detect_background(g)
+    if bg == new_bg:
+        return grid_copy(g)
+    return [[new_bg if c == bg else c for c in row] for row in g]
+
+
+def t_invert_background(g: Grid) -> Grid:
+    """Make all background cells the most common non-background color, and vice versa."""
+    bg = _detect_background(g)
+    from collections import Counter
+    other = Counter(v for row in g for v in row if v != bg)
+    if not other:
+        return grid_copy(g)
+    fg = other.most_common(1)[0][0]
+    return [[fg if c == bg else (bg if c == fg else c) for c in row] for row in g]
+
+
+def t_recolor_each_object_by_rank(g: Grid, rank_to_color: dict[int, int]) -> Grid | None:
+    """Sort objects by size descending. Object at rank R gets recolored to rank_to_color[R]."""
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    objs_sorted = sorted(objs, key=lambda o: -len(o["cells"]))
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for rank, o in enumerate(objs_sorted):
+        if rank not in rank_to_color:
+            return None
+        nc = rank_to_color[rank]
+        for r, c in o["cells"]:
+            out[r][c] = nc
+    return out
+
+
+def _learn_rank_to_color(train_pairs: list[tuple[Grid, Grid]]):
+    """Learn rank -> color mapping from training pairs."""
+    mapping: dict[int, int] = {}
+    for inp, out in train_pairs:
+        if grid_dims(inp) != grid_dims(out):
+            return None
+        objs = find_objects(inp, by_color=True)
+        if not objs:
+            return None
+        objs_sorted = sorted(objs, key=lambda o: -len(o["cells"]))
+        for rank, o in enumerate(objs_sorted):
+            colors_at_obj = {out[r][c] for r, c in o["cells"]}
+            if len(colors_at_obj) != 1:
+                return None
+            color = next(iter(colors_at_obj))
+            if rank in mapping and mapping[rank] != color:
+                return None
+            mapping[rank] = color
+    return mapping if mapping else None
+
+
 def t_recolor_objects_by_size(g: Grid, small_color: int, large_color: int) -> Grid | None:
     """Recolor the smallest object to small_color and the largest to large_color."""
     objs = find_objects(g, by_color=True)
@@ -2143,6 +2262,8 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _pattern_programs(train_pairs)
         + _drawing_programs(train_pairs)
         + _recolor_size_programs(train_pairs)
+        + _rank_recolor_programs(train_pairs)
+        + _background_programs(train_pairs)
         + _per_object_transform_programs(train_pairs)
         + _object_filter_programs(train_pairs)
         + _diagonal_programs(train_pairs)
