@@ -35,11 +35,11 @@ def test_arc2d_training_baseline():
 
 @pytest.mark.skipif(not _data_available(EVAL_DIR), reason="ARC-AGI evaluation data not downloaded")
 def test_arc2d_evaluation_baseline():
-    """Held-out evaluation must hold at >= 1.25% (currently 6/400 = 1.50%)."""
+    """Held-out evaluation must hold at >= 1.5% (currently 7/400 = 1.75%)."""
     r = evaluate_directory(EVAL_DIR)
     total = len(r)
     correct = sum(sum(rs) for rs in r.values())
     if total == 0:
         pytest.skip("no tasks found")
     acc = correct / total
-    assert acc >= 0.0125, f"evaluation: {correct}/{total} = {acc:.4f}, expected >= 0.0125"
+    assert acc >= 0.015, f"evaluation: {correct}/{total} = {acc:.4f}, expected >= 0.015"

@@ -580,6 +580,17 @@ def _shape_preserving_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Pro
     return progs
 
 
+def _per_cell_substitute_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    info = _learn_per_cell_substitute(train_pairs)
+    if info is None:
+        return []
+    kr, kc, table = info
+    return [Program(
+        f"per_cell_substitute_{kr}x{kc}",
+        lambda g, kr=kr, kc=kc, t=table: t_per_cell_substitute(g, kr, kc, t),
+    )]
+
+
 def _scale_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """Programs that change dimensions deterministically (tile, scale, crop)."""
     progs: list[Program] = []
@@ -795,6 +806,58 @@ def t_property_to_constant_grid(g: Grid, prop_fn, value_to_grid: dict) -> Grid |
     if v not in value_to_grid:
         return None
     return [row[:] for row in value_to_grid[v]]
+
+
+def t_per_cell_substitute(g: Grid, kr: int, kc: int, table: dict[int, Grid]) -> Grid | None:
+    """Replace each input cell with the corresponding KxK block from the lookup table."""
+    h, w = grid_dims(g)
+    out: Grid = [[0] * (w * kc) for _ in range(h * kr)]
+    for r in range(h):
+        for c in range(w):
+            v = g[r][c]
+            if v not in table:
+                return None
+            block = table[v]
+            for br in range(kr):
+                for bc in range(kc):
+                    out[r * kr + br][c * kc + bc] = block[br][bc]
+    return out
+
+
+def _learn_per_cell_substitute(train_pairs: list[tuple[Grid, Grid]]):
+    """Detect if output is k× input AND each input value corresponds to a fixed
+    output block. Returns (kr, kc, table) or None."""
+    # Determine k from the first pair
+    if not train_pairs:
+        return None
+    inp0, out0 = train_pairs[0]
+    h0, w0 = grid_dims(inp0)
+    H0, W0 = grid_dims(out0)
+    if h0 == 0 or w0 == 0 or H0 % h0 != 0 or W0 % w0 != 0:
+        return None
+    kr = H0 // h0; kc = W0 // w0
+    if kr <= 1 and kc <= 1:
+        return None
+    # Verify all pairs have the same kr, kc
+    for inp, out in train_pairs:
+        h, w = grid_dims(inp); H, W = grid_dims(out)
+        if h * kr != H or w * kc != W:
+            return None
+    # Build the lookup
+    table: dict[int, Grid] = {}
+    for inp, out in train_pairs:
+        h, w = grid_dims(inp)
+        for r in range(h):
+            for c in range(w):
+                v = inp[r][c]
+                block = [out[r * kr + br][c * kc: c * kc + kc] for br in range(kr)]
+                if v in table:
+                    # All blocks for the same v must be identical
+                    if table[v] != block:
+                        return None
+                else:
+                    table[v] = [row[:] for row in block]
+    return (kr, kc, table)
 
 
 def t_count_color_to_grid(g: Grid, color: int, output_color: int) -> Grid:
@@ -2004,6 +2067,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _ca_programs(train_pairs)
         + _shape_preserving_programs(train_pairs)
         + _scale_programs(train_pairs)
+        + _per_cell_substitute_programs(train_pairs)
         + _selection_programs(train_pairs)
         + _fill_programs(train_pairs)
         + _gravity_programs(train_pairs)
