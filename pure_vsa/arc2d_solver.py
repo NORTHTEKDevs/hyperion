@@ -1620,6 +1620,43 @@ def _rank_recolor_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     return progs
 
 
+def _alignment_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    for edge in ("top", "bottom", "left", "right"):
+        progs.append(Program(
+            f"align_objects_to_{edge}",
+            lambda g, edge=edge: t_align_objects_to_edge(g, edge),
+        ))
+    return progs
+
+
+def _mask_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    # Only fires when output width is half the input width OR output height is half input height
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if wo * 2 == wi and ho == hi:
+            progs.append(Program("mask_and_horizontal", t_mask_and))
+            progs.append(Program("mask_or_horizontal", t_mask_or))
+            progs.append(Program("mask_xor_horizontal", t_mask_xor))
+            break
+        if ho * 2 == hi and wo == wi:
+            progs.append(Program("mask_and_vertical", t_mask_and_vertical))
+            break
+    return progs
+
+
+def _radial_symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    progs.append(Program("complete_rotational_symmetry", t_complete_rotational_symmetry))
+    progs.append(Program("complete_4fold_symmetry", t_complete_4fold_symmetry))
+    return progs
+
+
 def _background_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -1984,6 +2021,120 @@ def t_outline_objects(g: Grid, outline_color: int) -> Grid:
     return out
 
 
+def t_align_objects_to_edge(g: Grid, edge: str) -> Grid | None:
+    """Move each object to the specified edge (top, bottom, left, right) of the
+    grid, preserving its shape and relative position along the perpendicular axis."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out: Grid = [[0] * w for _ in range(h)]
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        oh = r1 - r0 + 1; ow = c1 - c0 + 1
+        if edge == "top":
+            new_r0 = 0; new_c0 = c0
+        elif edge == "bottom":
+            new_r0 = h - oh; new_c0 = c0
+        elif edge == "left":
+            new_r0 = r0; new_c0 = 0
+        elif edge == "right":
+            new_r0 = r0; new_c0 = w - ow
+        else:
+            return None
+        for r, c in o["cells"]:
+            nr = new_r0 + (r - r0); nc = new_c0 + (c - c0)
+            if 0 <= nr < h and 0 <= nc < w:
+                out[nr][nc] = o["color"]
+    return out
+
+
+def t_complete_rotational_symmetry(g: Grid) -> Grid | None:
+    """If g has approximate 180-degree rotational symmetry (about center), complete it."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w):
+            mr, mc = h - 1 - r, w - 1 - c
+            if out[r][c] == 0 and g[mr][mc] != 0:
+                out[r][c] = g[mr][mc]
+    return out
+
+
+def t_complete_4fold_symmetry(g: Grid) -> Grid | None:
+    """Complete H + V + rotational symmetries together (4-fold radial)."""
+    h, w = grid_dims(g)
+    if h != w:
+        return None
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w):
+            mirrors = [(r, c), (r, w - 1 - c), (h - 1 - r, c), (h - 1 - r, w - 1 - c)]
+            colors = [g[mr][mc] for mr, mc in mirrors if g[mr][mc] != 0]
+            if colors and len(set(colors)) == 1:
+                out[r][c] = colors[0]
+    return out
+
+
+def t_mask_and(g: Grid) -> Grid | None:
+    """Split grid horizontally into two halves; output is AND-mask (cells that are
+    non-zero in both halves get color from left half, others 0)."""
+    h, w = grid_dims(g)
+    if w % 2 != 0:
+        return None
+    half = w // 2
+    out: Grid = [[0] * half for _ in range(h)]
+    for r in range(h):
+        for c in range(half):
+            if g[r][c] != 0 and g[r][c + half] != 0:
+                out[r][c] = g[r][c]
+    return out
+
+
+def t_mask_or(g: Grid) -> Grid | None:
+    h, w = grid_dims(g)
+    if w % 2 != 0:
+        return None
+    half = w // 2
+    out: Grid = [[0] * half for _ in range(h)]
+    for r in range(h):
+        for c in range(half):
+            left = g[r][c]; right = g[r][c + half]
+            if left != 0:
+                out[r][c] = left
+            elif right != 0:
+                out[r][c] = right
+    return out
+
+
+def t_mask_xor(g: Grid) -> Grid | None:
+    h, w = grid_dims(g)
+    if w % 2 != 0:
+        return None
+    half = w // 2
+    out: Grid = [[0] * half for _ in range(h)]
+    for r in range(h):
+        for c in range(half):
+            left = g[r][c]; right = g[r][c + half]
+            if (left != 0) != (right != 0):
+                out[r][c] = left if left != 0 else right
+    return out
+
+
+def t_mask_and_vertical(g: Grid) -> Grid | None:
+    """Same as t_mask_and but split vertically."""
+    h, w = grid_dims(g)
+    if h % 2 != 0:
+        return None
+    half = h // 2
+    out: Grid = [[0] * w for _ in range(half)]
+    for r in range(half):
+        for c in range(w):
+            if g[r][c] != 0 and g[r + half][c] != 0:
+                out[r][c] = g[r][c]
+    return out
+
+
 def _detect_background(g: Grid) -> int:
     """Most common color, treated as background."""
     from collections import Counter
@@ -2264,6 +2415,9 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _recolor_size_programs(train_pairs)
         + _rank_recolor_programs(train_pairs)
         + _background_programs(train_pairs)
+        + _radial_symmetry_programs(train_pairs)
+        + _mask_programs(train_pairs)
+        + _alignment_programs(train_pairs)
         + _per_object_transform_programs(train_pairs)
         + _object_filter_programs(train_pairs)
         + _diagonal_programs(train_pairs)
