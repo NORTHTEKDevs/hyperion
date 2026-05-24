@@ -1515,6 +1515,34 @@ def _line_drawing_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     return progs
 
 
+def _fill_between_markers_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    seen: set[int] = set()
+    new_colors: set[int] = set()
+    for inp, out in train_pairs:
+        seen.update(colors_in(inp))
+        new_colors.update(colors_in(out) - colors_in(inp))
+    seen.discard(0)
+    new_colors.discard(0)
+    fill_set = new_colors if new_colors else seen
+    for marker in seen:
+        for fc in fill_set:
+            if marker == fc and fc not in new_colors:
+                continue
+            progs.append(Program(
+                f"fill_between_{marker}_with_{fc}",
+                lambda g, m=marker, f=fc: t_fill_between_same_color_markers(g, m, f),
+            ))
+    for nc in new_colors:
+        progs.append(Program(
+            f"recolor_non_majority_nonzero_to_{nc}",
+            lambda g, nc=nc: t_recolor_non_majority_nonzero(g, nc),
+        ))
+    return progs
+
+
 def _object_filter_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -1660,6 +1688,42 @@ def t_connect_two_points_of_color(g: Grid, color: int, line_color: int) -> Grid 
                 out[r][c] = line_color
         return out
     return None
+
+
+def t_fill_between_same_color_markers(g: Grid, marker_color: int, fill_color: int) -> Grid:
+    """For each row and column, find pairs of cells with marker_color separated
+    by zeros, and fill the zeros between them with fill_color."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    # Per row
+    for r in range(h):
+        positions = [c for c in range(w) if g[r][c] == marker_color]
+        for i in range(len(positions) - 1):
+            c1, c2 = positions[i], positions[i + 1]
+            if all(g[r][c] == 0 for c in range(c1 + 1, c2)):
+                for c in range(c1 + 1, c2):
+                    if out[r][c] == 0:
+                        out[r][c] = fill_color
+    # Per column
+    for c in range(w):
+        positions = [r for r in range(h) if g[r][c] == marker_color]
+        for i in range(len(positions) - 1):
+            r1, r2 = positions[i], positions[i + 1]
+            if all(g[r][c] == 0 for r in range(r1 + 1, r2)):
+                for r in range(r1 + 1, r2):
+                    if out[r][c] == 0:
+                        out[r][c] = fill_color
+    return out
+
+
+def t_recolor_non_majority_nonzero(g: Grid, new_color: int) -> Grid | None:
+    """Keep the majority color, recolor all other non-zero cells to new_color."""
+    from collections import Counter
+    c = Counter(v for row in g for v in row if v != 0)
+    if not c:
+        return None
+    maj, _ = c.most_common(1)[0]
+    return [[new_color if v != 0 and v != maj else v for v in row] for row in g]
 
 
 def t_keep_only_object_of_color(g: Grid, color: int) -> Grid:
@@ -2083,6 +2147,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _object_filter_programs(train_pairs)
         + _diagonal_programs(train_pairs)
         + _line_drawing_programs(train_pairs)
+        + _fill_between_markers_programs(train_pairs)
         + _property_to_output_programs_constrained(train_pairs)  # LAST: high false-positive risk
     )
 

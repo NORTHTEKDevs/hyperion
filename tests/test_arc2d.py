@@ -23,14 +23,14 @@ def _data_available(d: Path) -> bool:
 
 @pytest.mark.skipif(not _data_available(TRAIN_DIR), reason="ARC-AGI training data not downloaded")
 def test_arc2d_training_baseline():
-    """Baseline must hold at >= 11.5% on ARC-AGI training (47/400 = 11.75% achieved)."""
+    """Baseline must hold at >= 12.0% on ARC-AGI training (50/400 = 12.50% achieved)."""
     r = evaluate_directory(TRAIN_DIR)
     total = len(r)
     correct = sum(sum(rs) for rs in r.values())
     if total == 0:
         pytest.skip("no tasks found")
     acc = correct / total
-    assert acc >= 0.115, f"training: {correct}/{total} = {acc:.4f}, expected >= 0.115"
+    assert acc >= 0.12, f"training: {correct}/{total} = {acc:.4f}, expected >= 0.12"
 
 
 @pytest.mark.skipif(not _data_available(EVAL_DIR), reason="ARC-AGI evaluation data not downloaded")
