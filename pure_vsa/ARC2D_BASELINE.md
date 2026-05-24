@@ -1,6 +1,6 @@
 # 2D ARC-AGI baseline
 
-**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~145-primitive library + composition + cellular-automaton rule induction + input-property-to-output induction + per-cell-substitute, reaches **11.75% on the public training set (47 / 400)** and **1.75% on the held-out evaluation set (7 / 400)**.
+**Current result:** the same enumerative program-synthesis approach that hits 100% on 1D-ARC, extended to 2D grids with a ~155-primitive library + composition + cellular-automaton rule induction + input-property-to-output induction + per-cell-substitute + fill-between-markers, reaches **12.50% on the public training set (50 / 400)** and **1.75% on the held-out evaluation set (7 / 400)**.
 
 This is a baseline, not a flagship. The point is to establish that the *mechanism* works on 2D and to measure how far an honest primitive library + composition gets you without specialized search heuristics.
 
@@ -24,6 +24,7 @@ This is a baseline, not a flagship. The point is to establish that the *mechanis
 | 14. + input-property-to-output induction (constrained: small outputs only, runs last) | ~135 | **11.75% (47/400)** | **1.50% (6/400)** |
 | 15. + bbox-grid extraction, non-majority subgrid, iterated CA | ~140 | 11.75% (47/400) | 1.50% (6/400) |
 | 16. + per-cell-substitute (each input cell -> learned KxL output block) | ~145 | 11.75% (47/400) | **1.75% (7/400)** |
+| 17. + fill-between-same-color-markers, recolor-non-majority-nonzero | ~155 | **12.50% (50/400)** | 1.75% (7/400) |
 
 **Plateau broken at iteration 10** by the CA-rule induction primitive (the first one that actually learns a per-cell transformation from training data instead of being a hand-coded geometric op). It's the most general primitive in the library and unlocked patterns the geometric primitives couldn't reach.
 
