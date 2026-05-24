@@ -1620,6 +1620,22 @@ def _rank_recolor_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     return progs
 
 
+def _noise_removal_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    # For each color, try removing it (some tasks have a "remove this color" rule)
+    seen: set[int] = set()
+    for inp, _ in train_pairs:
+        seen.update(colors_in(inp))
+    seen.discard(0)
+    for col in seen:
+        progs.append(Program(f"remove_color_{col}", lambda g, col=col: t_remove_objects_by_color(g, col)))
+    progs.append(Program("keep_largest_of_each_color", t_keep_only_largest_object_of_each_color))
+    progs.append(Program("remove_noise_singletons", t_remove_noise_singletons))
+    return progs
+
+
 def _alignment_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2021,6 +2037,47 @@ def t_outline_objects(g: Grid, outline_color: int) -> Grid:
     return out
 
 
+def t_remove_objects_by_color(g: Grid, color: int) -> Grid:
+    """Set all cells of `color` to 0 (remove that color entirely)."""
+    return [[0 if c == color else c for c in row] for row in g]
+
+
+def t_keep_only_largest_object_of_each_color(g: Grid) -> Grid | None:
+    """For each distinct non-bg color, keep only the largest connected object of that color."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    from collections import defaultdict
+    by_color: dict[int, list[dict]] = defaultdict(list)
+    for o in objs:
+        by_color[o["color"]].append(o)
+    out: Grid = [[0] * w for _ in range(h)]
+    for color, group in by_color.items():
+        largest = max(group, key=lambda o: len(o["cells"]))
+        for r, c in largest["cells"]:
+            out[r][c] = color
+    return out
+
+
+def t_remove_noise_singletons(g: Grid) -> Grid:
+    """Remove isolated cells (no 4-neighbor of any color), keep larger objects."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == 0:
+                continue
+            isolated = True
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and g[nr][nc] != 0:
+                    isolated = False; break
+            if isolated:
+                out[r][c] = 0
+    return out
+
+
 def t_align_objects_to_edge(g: Grid, edge: str) -> Grid | None:
     """Move each object to the specified edge (top, bottom, left, right) of the
     grid, preserving its shape and relative position along the perpendicular axis."""
@@ -2418,6 +2475,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _radial_symmetry_programs(train_pairs)
         + _mask_programs(train_pairs)
         + _alignment_programs(train_pairs)
+        + _noise_removal_programs(train_pairs)
         + _per_object_transform_programs(train_pairs)
         + _object_filter_programs(train_pairs)
         + _diagonal_programs(train_pairs)
