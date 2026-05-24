@@ -728,6 +728,24 @@ def t_keep_only_color_mask(g: Grid, color: int, replace_with: int) -> Grid:
     return [[replace_with if c == color else 0 for c in row] for row in g]
 
 
+def t_count_color_to_grid(g: Grid, color: int, output_color: int) -> Grid:
+    """Output is a 1xN grid filled with `output_color` where N is the count of `color` in input."""
+    n = sum(row.count(color) for row in g)
+    if n <= 0:
+        return [[0]]
+    return [[output_color] * n]
+
+
+def t_dominant_color_grid(g: Grid, h: int, w: int) -> Grid | None:
+    """Output an HxW grid filled with the most common non-zero color in input."""
+    from collections import Counter
+    c = Counter(v for row in g for v in row if v != 0)
+    if not c:
+        return None
+    color = c.most_common(1)[0][0]
+    return [[color] * w for _ in range(h)]
+
+
 def _detect_grid_dividers(g: Grid) -> tuple[list[int], list[int], int] | None:
     """Detect rows/cols that are uniformly filled with a single color (acting
     as grid dividers). Returns (divider_rows, divider_cols, color) or None.
@@ -1280,6 +1298,22 @@ def _drawing_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     return progs
 
 
+def _per_object_transform_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    for name, fn in [
+        ("per_obj_flip_h", t_flip_h),
+        ("per_obj_flip_v", t_flip_v),
+        ("per_obj_rotate90", t_rotate90),
+        ("per_obj_rotate180", t_rotate180),
+        ("per_obj_rotate270", t_rotate270),
+        ("per_obj_transpose", t_transpose),
+    ]:
+        progs.append(Program(name, lambda g, fn=fn: t_per_object_transform(g, fn)))
+    return progs
+
+
 def _recolor_size_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -1324,6 +1358,55 @@ def _detected_symmetry_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Pr
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
         return []
     return [Program("complete_detected_symmetry", t_complete_detected_symmetry)]
+
+
+def _object_to_grid(o: dict) -> Grid:
+    """Extract just the object's bbox as a small grid (color cell vs 0)."""
+    r0, c0, r1, c1 = o["bbox"]
+    h = r1 - r0 + 1
+    w = c1 - c0 + 1
+    out: Grid = [[0] * w for _ in range(h)]
+    for r, c in o["cells"]:
+        out[r - r0][c - c0] = o["color"]
+    return out
+
+
+def _place_grid_at(canvas: Grid, sub: Grid, r0: int, c0: int) -> None:
+    """In-place: place `sub` onto `canvas` starting at (r0, c0), overwriting only non-zero."""
+    H, W = grid_dims(canvas)
+    h, w = grid_dims(sub)
+    for r in range(h):
+        for c in range(w):
+            if sub[r][c] != 0 and 0 <= r0 + r < H and 0 <= c0 + c < W:
+                canvas[r0 + r][c0 + c] = sub[r][c]
+
+
+def t_per_object_transform(g: Grid, fn) -> Grid | None:
+    """Apply a small-grid transform to each object's bbox-extract independently,
+    then place it back at the same top-left position."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    # Clear cells that were part of objects
+    out: Grid = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c in range(w):
+            out[r][c] = g[r][c]
+    for o in objs:
+        sub = _object_to_grid(o)
+        try:
+            transformed = fn(sub)
+        except Exception:
+            return None
+        if transformed is None:
+            return None
+        # clear original cells
+        for r, c in o["cells"]:
+            out[r][c] = 0
+        r0, c0, _, _ = o["bbox"]
+        _place_grid_at(out, transformed, r0, c0)
+    return out
 
 
 def t_fill_each_object_bbox(g: Grid) -> Grid | None:
@@ -1594,6 +1677,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _pattern_programs(train_pairs)
         + _drawing_programs(train_pairs)
         + _recolor_size_programs(train_pairs)
+        + _per_object_transform_programs(train_pairs)
     )
 
 
