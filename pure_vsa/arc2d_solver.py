@@ -613,6 +613,29 @@ def _extend_cell_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]
     return progs
 
 
+def _draw_x_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    in_colors: set[int] = set()
+    new_colors: set[int] = set()
+    for inp, out in train_pairs:
+        in_colors.update(colors_in(inp))
+        new_colors.update(colors_in(out) - colors_in(inp))
+    in_colors.discard(0)
+    new_colors.discard(0)
+    # Try each input color as marker, each color as line
+    for mc in in_colors:
+        for lc in in_colors | new_colors:
+            if lc == 0:
+                continue
+            progs.append(Program(
+                f"draw_x_from_{mc}_color_{lc}",
+                lambda g, mc=mc, lc=lc: t_draw_x_from_marker(g, mc, lc),
+            ))
+    return progs
+
+
 def _progressive_shift_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """When output has more rows than input, possibly progressive shift."""
     progs: list[Program] = []
@@ -2465,6 +2488,38 @@ def t_extract_middle_row(g: Grid) -> Grid | None:
     return [g[h // 2][:]]
 
 
+def t_draw_x_from_marker(g: Grid, marker_color: int, line_color: int) -> Grid | None:
+    """Find unique cell of marker_color, draw both diagonals through it in line_color."""
+    h, w = grid_dims(g)
+    from collections import Counter
+    cc = Counter(v for row in g for v in row)
+    if cc.get(marker_color, 0) != 1:
+        return None
+    mr, mc = next((r, c) for r in range(h) for c in range(w) if g[r][c] == marker_color)
+    out = grid_copy(g)
+    # diagonal /\
+    for d in range(-max(h, w), max(h, w) + 1):
+        nr, nc = mr + d, mc + d
+        if 0 <= nr < h and 0 <= nc < w and (nr, nc) != (mr, mc) and out[nr][nc] == g[mr][mc]:
+            # don't overwrite the marker itself — only fill background
+            pass
+        if 0 <= nr < h and 0 <= nc < w and out[nr][nc] != line_color and out[nr][nc] != marker_color:
+            # only overwrite the background (not other colored cells)
+            pass
+    # Simpler version: replace background cells on the two diagonals with line_color
+    bg = _detect_background(g)
+    for d in range(-max(h, w), max(h, w) + 1):
+        # main diagonal
+        nr, nc = mr + d, mc + d
+        if 0 <= nr < h and 0 <= nc < w and g[nr][nc] == bg:
+            out[nr][nc] = line_color
+        # anti diagonal
+        nr, nc = mr + d, mc - d
+        if 0 <= nr < h and 0 <= nc < w and g[nr][nc] == bg:
+            out[nr][nc] = line_color
+    return out
+
+
 def t_extend_each_cell_down(g: Grid) -> Grid:
     """For each non-zero cell, fill the column below it (down to bottom) with the same color."""
     h, w = grid_dims(g)
@@ -3112,6 +3167,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _kaleidoscope_programs(train_pairs)
         + _row_col_extract_programs(train_pairs)
         + _extend_cell_programs(train_pairs)
+        + _draw_x_programs(train_pairs)
         + _progressive_shift_programs(train_pairs)
         + _split_both_zero_programs(train_pairs)
         + _per_cell_substitute_programs(train_pairs)
