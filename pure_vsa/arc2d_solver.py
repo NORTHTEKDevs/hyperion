@@ -1847,6 +1847,7 @@ def _hodel_inspired_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
 
     # compress: try always when same-shape allowed AND output is smaller
     progs.append(Program("compress", t_compress))
+    progs.append(Program("compress_remove_frontiers", t_compress_remove_frontiers))
 
     # Halves — fire when output is half the input in one dimension
     for inp, out in train_pairs:
@@ -1870,6 +1871,13 @@ def _hodel_inspired_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
         in_colors.discard(0)
         for col in in_colors:
             progs.append(Program(f"cover_color_{col}", lambda g, col=col: t_cover_color(g, col)))
+            progs.append(Program(f"replace_{col}_with_majority", lambda g, col=col: t_replace_color_with_majority(g, col)))
+        for a in in_colors:
+            for b in in_colors:
+                if a >= b: continue
+                progs.append(Program(f"swap_{a}_{b}", lambda g, a=a, b=b: t_swap_colors(g, a, b)))
+        progs.append(Program("keep_objs_touching_border", t_keep_only_objects_touching_border))
+        progs.append(Program("keep_objs_not_touching_border", t_keep_only_objects_not_touching_border))
 
     # fill_object_deltas (fill bbox-but-not-object cells)
     if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2709,6 +2717,51 @@ def t_fill_object_deltas(g: Grid, fill_color: int) -> Grid | None:
     return out
 
 
+def t_swap_colors(g: Grid, a: int, b: int) -> Grid:
+    """Swap all cells of color a with color b and vice versa."""
+    return [[b if c == a else (a if c == b else c) for c in row] for row in g]
+
+
+def t_replace_color_with_majority(g: Grid, color: int) -> Grid | None:
+    """Replace cells of `color` with the majority non-zero non-color color."""
+    from collections import Counter
+    cc = Counter(v for row in g for v in row if v != 0 and v != color)
+    if not cc:
+        return None
+    rep = cc.most_common(1)[0][0]
+    return [[rep if c == color else c for c in row] for row in g]
+
+
+def t_keep_only_objects_touching_border(g: Grid) -> Grid | None:
+    """Keep objects that have at least one cell touching the grid border."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = [[0] * w for _ in range(h)]
+    for o in objs:
+        touches = any(r == 0 or r == h - 1 or c == 0 or c == w - 1 for r, c in o["cells"])
+        if touches:
+            for r, c in o["cells"]:
+                out[r][c] = o["color"]
+    return out
+
+
+def t_keep_only_objects_not_touching_border(g: Grid) -> Grid | None:
+    """Inverse: keep objects that do NOT touch the border (interior objects)."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = [[0] * w for _ in range(h)]
+    for o in objs:
+        touches = any(r == 0 or r == h - 1 or c == 0 or c == w - 1 for r, c in o["cells"])
+        if not touches:
+            for r, c in o["cells"]:
+                out[r][c] = o["color"]
+    return out
+
+
 def t_cover_color(g: Grid, color: int) -> Grid:
     """Remove all cells of `color` (set to 0)."""
     return [[0 if c == color else c for c in row] for row in g]
@@ -2761,6 +2814,21 @@ def t_trim(g: Grid) -> Grid | None:
     if h < 3 or w < 3:
         return None
     return [row[1:-1] for row in g[1:-1]]
+
+
+def t_compress_remove_frontiers(g: Grid) -> Grid | None:
+    """Hodel-style compress: remove rows AND columns that are uniformly one color
+    (the 'frontiers' / divider lines)."""
+    h, w = grid_dims(g)
+    if h == 0 or w == 0:
+        return None
+    keep_rows = [r for r in range(h) if len(set(g[r])) > 1]
+    if not keep_rows:
+        return None
+    keep_cols = [c for c in range(w) if len(set(g[r][c] for r in range(h))) > 1]
+    if not keep_cols:
+        return None
+    return [[g[r][c] for c in keep_cols] for r in keep_rows]
 
 
 def t_compress(g: Grid) -> Grid | None:
