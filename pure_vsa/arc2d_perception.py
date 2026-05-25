@@ -32,7 +32,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "huihui_ai/qwen2.5-coder-abliterate:7b"
 LARGER_MODEL = "huihui_ai/qwen3-coder-abliterated:30b"
 MAX_RETRIES = 4
-PER_CALL_TIMEOUT = 120  # seconds per LLM call
+PER_CALL_TIMEOUT = 300  # seconds per LLM call (enough for 30B on GPU)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +341,67 @@ def _verify_against_training(fn: Callable, train_pairs) -> tuple[bool, int | Non
         if got != out:
             return (False, i, out, got)
     return (True, None, None, None)
+
+
+def solve_task_best_of_n(task_data: dict, n_samples: int = 30,
+                          model: str = LARGER_MODEL,
+                          verbose: bool = False) -> tuple[str, list[list[int]]] | None:
+    """AlphaCode-style: sample N candidate rules from the LLM, test EACH against
+    training, return the first that matches all training pairs. The LLM is a
+    noisy generator; the training pairs are a perfect filter."""
+    train = task_data.get("train", [])
+    test = task_data.get("test", [])
+    if not train or not test:
+        return None
+    train_pairs = [(t["input"], t["output"]) for t in train]
+    test_inp = test[0]["input"]
+
+    prompt = PROMPT_PERCEPTION.format(
+        grammar=GRAMMAR_DESCRIPTION,
+        examples=_format_examples(train_pairs),
+        retry_feedback="",
+    )
+
+    for sample_idx in range(n_samples):
+        if verbose:
+            print(f"  sample {sample_idx + 1}/{n_samples}...")
+        # Higher temperature for diversity across samples
+        response = _call_ollama_temp(prompt, model, temperature=0.7 if sample_idx > 0 else 0.2)
+        rule = _extract_json(response)
+        if rule is None:
+            continue
+        fn = compile_rule(rule)
+        if fn is None:
+            continue
+        ok, _, _, _ = _verify_against_training(fn, train_pairs)
+        if ok:
+            try:
+                result = fn(copy.deepcopy(test_inp))
+            except Exception:
+                continue
+            if result is not None:
+                if verbose:
+                    print(f"  HIT on sample {sample_idx + 1}: {rule}")
+                return ("llm_best_of_n", result)
+    return None
+
+
+def _call_ollama_temp(prompt: str, model: str, temperature: float = 0.3) -> str:
+    try:
+        r = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": temperature, "num_predict": 800},
+            },
+            timeout=PER_CALL_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json().get("response", "")
+    except Exception:
+        return ""
 
 
 def solve_task_perception(task_data: dict, model: str = DEFAULT_MODEL,
