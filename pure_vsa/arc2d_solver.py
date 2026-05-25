@@ -601,6 +601,15 @@ def _kaleidoscope_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     return []
 
 
+def _keep_only_row_col_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    progs.append(Program("keep_only_middle_column", t_keep_only_middle_column))
+    progs.append(Program("keep_only_middle_row", t_keep_only_middle_row))
+    return progs
+
+
 def _extend_cell_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -624,6 +633,10 @@ def _pair_rectangle_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
         progs.append(Program(
             f"fill_pair_bbox_rect_{nc}",
             lambda g, nc=nc: t_fill_pair_bbox_rectangles(g, nc),
+        ))
+        progs.append(Program(
+            f"fill_between_any_color_with_{nc}",
+            lambda g, nc=nc: t_fill_between_any_color_markers(g, nc),
         ))
     return progs
 
@@ -2471,6 +2484,27 @@ def t_kaleidoscope_2x2(g: Grid) -> Grid:
     return out
 
 
+def t_keep_only_column(g: Grid, c_idx: int) -> Grid:
+    """Zero out everything except column c_idx."""
+    h, w = grid_dims(g)
+    return [[g[r][c] if c == c_idx else 0 for c in range(w)] for r in range(h)]
+
+
+def t_keep_only_row(g: Grid, r_idx: int) -> Grid:
+    h, w = grid_dims(g)
+    return [(g[r][:] if r == r_idx else [0] * w) for r in range(h)]
+
+
+def t_keep_only_middle_column(g: Grid) -> Grid:
+    h, w = grid_dims(g)
+    return t_keep_only_column(g, w // 2)
+
+
+def t_keep_only_middle_row(g: Grid) -> Grid:
+    h, _ = grid_dims(g)
+    return t_keep_only_row(g, h // 2)
+
+
 def t_extract_first_column(g: Grid) -> Grid:
     """Output is the first column of g as a Hx1 grid."""
     h, _ = grid_dims(g)
@@ -2534,6 +2568,34 @@ def t_draw_x_from_marker(g: Grid, marker_color: int, line_color: int) -> Grid | 
         nr, nc = mr + d, mc - d
         if 0 <= nr < h and 0 <= nc < w and g[nr][nc] == bg:
             out[nr][nc] = line_color
+    return out
+
+
+def t_fill_between_any_color_markers(g: Grid, fill_color: int) -> Grid:
+    """For ANY non-zero color, find pairs of consecutive same-color cells in
+    rows and columns, fill the zero cells between them with fill_color."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    colors_present = colors_in(g) - {0}
+    for marker_color in colors_present:
+        # Per row
+        for r in range(h):
+            positions = [c for c in range(w) if g[r][c] == marker_color]
+            for i in range(len(positions) - 1):
+                c1, c2 = positions[i], positions[i + 1]
+                if all(g[r][c] == 0 for c in range(c1 + 1, c2)):
+                    for c in range(c1 + 1, c2):
+                        if out[r][c] == 0:
+                            out[r][c] = fill_color
+        # Per column
+        for c in range(w):
+            positions = [r for r in range(h) if g[r][c] == marker_color]
+            for i in range(len(positions) - 1):
+                r1, r2 = positions[i], positions[i + 1]
+                if all(g[r][c] == 0 for r in range(r1 + 1, r2)):
+                    for r in range(r1 + 1, r2):
+                        if out[r][c] == 0:
+                            out[r][c] = fill_color
     return out
 
 
@@ -3211,6 +3273,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _extend_cell_programs(train_pairs)
         + _draw_x_programs(train_pairs)
         + _pair_rectangle_programs(train_pairs)
+        + _keep_only_row_col_programs(train_pairs)
         + _progressive_shift_programs(train_pairs)
         + _split_both_zero_programs(train_pairs)
         + _per_cell_substitute_programs(train_pairs)
