@@ -3888,13 +3888,17 @@ def solve_task(task_data: dict, allow_compose: bool = True,
         # Pattern: geometric -> object-select -> recolor (or permutations).
         core_geometric = [p for p in progs if p.name in {
             "flip_h", "flip_v", "rotate90", "rotate180", "rotate270", "transpose",
+            "flip_diag_nw_se", "flip_diag_ne_sw",
         }]
         core_select = [p for p in progs if p.name in {
             "keep_largest_object_bycolor", "keep_smallest_object_bycolor",
             "keep_only_majority_color", "keep_only_minority_color",
+            "keep_only_unique_color", "remove_isolated_cells", "remove_noise_singletons",
         }]
         core_recolor = [p for p in progs if p.name.startswith("recolor_")
-                        or p.name.startswith("flood_fill_enclosed_")]
+                        or p.name.startswith("flood_fill_enclosed_")
+                        or p.name.startswith("ca_color_only_")
+                        or p.name.startswith("color_perm_")]
         # Try geometric -> select -> recolor and select -> geometric -> recolor
         for a in core_geometric + core_select:
             for b in core_select + core_geometric:
