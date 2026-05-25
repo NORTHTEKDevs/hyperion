@@ -1878,6 +1878,19 @@ def _hodel_inspired_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
                 progs.append(Program(f"swap_{a}_{b}", lambda g, a=a, b=b: t_swap_colors(g, a, b)))
         progs.append(Program("keep_objs_touching_border", t_keep_only_objects_touching_border))
         progs.append(Program("keep_objs_not_touching_border", t_keep_only_objects_not_touching_border))
+        progs.append(Program("paint_each_color_with_majority_of_bbox", t_paint_each_color_with_majority_color_of))
+
+    # extract bbox of specific color (only if output is smaller and there's a unique color)
+    in_colors_all: set[int] = set()
+    for inp, _ in train_pairs:
+        in_colors_all.update(colors_in(inp))
+    in_colors_all.discard(0)
+    for col in in_colors_all:
+        progs.append(Program(
+            f"extract_bbox_of_color_{col}",
+            lambda g, col=col: t_extract_bbox_of_color(g, col),
+        ))
+    progs.append(Program("replace_with_smallest_bbox_object", t_replace_with_smallest_bbox_object))
 
     # fill_object_deltas (fill bbox-but-not-object cells)
     if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2714,6 +2727,64 @@ def t_fill_object_deltas(g: Grid, fill_color: int) -> Grid | None:
             for c in range(c0, c1 + 1):
                 if (r, c) not in o["cells"] and out[r][c] == 0:
                     out[r][c] = fill_color
+    return out
+
+
+def t_extract_bbox_of_color(g: Grid, color: int) -> Grid | None:
+    """Crop to the bbox of cells of `color` AND keep only those cells."""
+    h, w = grid_dims(g)
+    min_r, max_r = h, -1; min_c, max_c = w, -1
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == color:
+                if r < min_r: min_r = r
+                if r > max_r: max_r = r
+                if c < min_c: min_c = c
+                if c > max_c: max_c = c
+    if max_r < 0:
+        return None
+    bh = max_r - min_r + 1; bw = max_c - min_c + 1
+    out: Grid = [[0] * bw for _ in range(bh)]
+    for r in range(min_r, max_r + 1):
+        for c in range(min_c, max_c + 1):
+            if g[r][c] == color:
+                out[r - min_r][c - min_c] = color
+    return out
+
+
+def t_paint_each_color_with_majority_color_of(g: Grid) -> Grid | None:
+    """For each connected object, recolor with the most common color in its bbox INCLUDING zeros.
+    Used in 'fill the shape with its dominant color' patterns."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = grid_copy(g)
+    from collections import Counter
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        c = Counter()
+        for r in range(r0, r1 + 1):
+            for cc in range(c0, c1 + 1):
+                c[g[r][cc]] += 1
+        if not c:
+            continue
+        new_color = c.most_common(1)[0][0]
+        for r, cc in o["cells"]:
+            out[r][cc] = new_color
+    return out
+
+
+def t_replace_with_smallest_bbox_object(g: Grid) -> Grid | None:
+    """If there are multiple objects, replace everything except the smallest with zeros."""
+    objs = find_objects(g, by_color=True)
+    if len(objs) < 2:
+        return None
+    smallest = min(objs, key=lambda o: (o["bbox"][2]-o["bbox"][0]+1)*(o["bbox"][3]-o["bbox"][1]+1))
+    h, w = grid_dims(g)
+    out: Grid = [[0] * w for _ in range(h)]
+    for r, c in smallest["cells"]:
+        out[r][c] = smallest["color"]
     return out
 
 
