@@ -596,7 +596,10 @@ def _kaleidoscope_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     for inp, out in train_pairs:
         hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
         if ho == 2 * hi and wo == 2 * wi:
-            return [Program("kaleidoscope_2x2", t_kaleidoscope_2x2)]
+            return [
+                Program("kaleidoscope_2x2", t_kaleidoscope_2x2),
+                Program("rotational_kaleidoscope_2x2", t_rotational_kaleidoscope_2x2),
+            ]
         break
     return []
 
@@ -2499,6 +2502,25 @@ def t_kaleidoscope_2x2(g: Grid) -> Grid:
     tr = t_flip_h(g)
     bl = t_flip_v(g)
     br = t_rotate180(g)
+    for r in range(h):
+        for c in range(w):
+            out[r][c] = g[r][c]
+            out[r][c + w] = tr[r][c]
+            out[r + h][c] = bl[r][c]
+            out[r + h][c + w] = br[r][c]
+    return out
+
+
+def t_rotational_kaleidoscope_2x2(g: Grid) -> Grid | None:
+    """Output 2x bigger: tl=g, tr=rotate90(g), br=rotate180(g), bl=rotate270(g).
+    Only valid for square inputs."""
+    h, w = grid_dims(g)
+    if h != w:
+        return None
+    tr = t_rotate90(g)
+    br = t_rotate180(g)
+    bl = t_rotate270(g)
+    out: Grid = [[0] * (w * 2) for _ in range(h * 2)]
     for r in range(h):
         for c in range(w):
             out[r][c] = g[r][c]
