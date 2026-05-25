@@ -1834,6 +1834,24 @@ def _marker_pattern_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
     return progs
 
 
+def _paint_with_marker_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    progs.append(Program("paint_with_marker_color", t_paint_with_marker_color))
+    return progs
+
+
+def _diagonal_stripe_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if ho == 2 * hi and wo == 2 * wi:
+            progs.append(Program("diagonal_stripe_replicate", t_diagonal_stripe_replicate))
+            break
+    return progs
+
+
 def _noise_removal_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2537,6 +2555,40 @@ def t_self_similar_tile_by_mask(g: Grid, mask_color: int) -> Grid:
                 for r in range(h):
                     for c in range(w):
                         out[tr * h + r][tc * w + c] = g[r][c]
+    return out
+
+
+def t_paint_with_marker_color(g: Grid) -> Grid | None:
+    """If there's a unique-color cell (the 'marker'), recolor all other non-zero
+    cells with the marker's color and remove the marker."""
+    from collections import Counter
+    h, w = grid_dims(g)
+    c = Counter(v for row in g for v in row if v != 0)
+    singletons = [k for k, n in c.items() if n == 1]
+    if len(singletons) != 1:
+        return None
+    marker_color = singletons[0]
+    out: Grid = [[0] * w for _ in range(h)]
+    for r in range(h):
+        for c2 in range(w):
+            if g[r][c2] != 0 and g[r][c2] != marker_color:
+                out[r][c2] = marker_color
+    return out
+
+
+def t_diagonal_stripe_replicate(g: Grid) -> Grid:
+    """Output is N*N where N=input size; each (r,c) tile-position contains
+    g shifted/cropped diagonally — i.e. the input is laid along the main
+    diagonal of a 2x bigger grid, with the input at (k, k) for k=0..N-1
+    (with overlaps preserved)."""
+    h, w = grid_dims(g)
+    out: Grid = [[0] * (w * 2) for _ in range(h * 2)]
+    # Place input at (0,0), (1,1), ..., (h-1,h-1) — only the cells that exist
+    for k in range(h):
+        for r in range(h):
+            for c in range(w):
+                if g[r][c] != 0 and k + r < h * 2 and k + c < w * 2:
+                    out[k + r][k + c] = g[r][c]
     return out
 
 
@@ -3418,6 +3470,8 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _alignment_programs(train_pairs)
         + _noise_removal_programs(train_pairs)
         + _marker_pattern_programs(train_pairs)
+        + _paint_with_marker_programs(train_pairs)
+        + _diagonal_stripe_programs(train_pairs)
         + _per_object_transform_programs(train_pairs)
         + _object_filter_programs(train_pairs)
         + _diagonal_programs(train_pairs)
