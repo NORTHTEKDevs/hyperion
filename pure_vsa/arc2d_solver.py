@@ -591,6 +591,57 @@ def _per_cell_substitute_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[
     )]
 
 
+def _kaleidoscope_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Kaleidoscope: detect when output is 2x in each dim and try the mirrored tile."""
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if ho == 2 * hi and wo == 2 * wi:
+            return [Program("kaleidoscope_2x2", t_kaleidoscope_2x2)]
+        break
+    return []
+
+
+def _row_col_extract_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Extract a specific row or column when output is 1xN or Nx1."""
+    progs: list[Program] = []
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if wo == 1 and ho == hi:
+            progs.append(Program("extract_first_column", t_extract_first_column))
+            progs.append(Program("extract_last_column", t_extract_last_column))
+            progs.append(Program("extract_middle_column", t_extract_middle_column))
+            break
+        if ho == 1 and wo == wi:
+            progs.append(Program("extract_first_row", t_extract_first_row))
+            progs.append(Program("extract_last_row", t_extract_last_row))
+            progs.append(Program("extract_middle_row", t_extract_middle_row))
+            break
+    return progs
+
+
+def _split_both_zero_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Output is half of input (axis-split), with fill where BOTH halves were 0."""
+    progs: list[Program] = []
+    halving_axes: set[str] = set()
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if wo * 2 == wi and ho == hi:
+            halving_axes.add("h")
+        elif ho * 2 == hi and wo == wi:
+            halving_axes.add("v")
+    new_colors: set[int] = set()
+    for _, out in train_pairs:
+        new_colors.update(colors_in(out))
+    new_colors.discard(0)
+    for axis in halving_axes:
+        for nc in new_colors:
+            progs.append(Program(
+                f"split_both_zero_{axis}_fill_{nc}",
+                lambda g, axis=axis, nc=nc: t_split_both_zero(g, axis, nc),
+            ))
+    return progs
+
+
 def _scale_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """Programs that change dimensions deterministically (tile, scale, crop)."""
     progs: list[Program] = []
@@ -2336,6 +2387,83 @@ def t_overlay_objects(g: Grid, mode: str = "or") -> Grid | None:
     return canvas
 
 
+def t_kaleidoscope_2x2(g: Grid) -> Grid:
+    """Output 2x bigger: tl=g, tr=flip_h(g), bl=flip_v(g), br=rotate180(g)."""
+    h, w = grid_dims(g)
+    out: Grid = [[0] * (w * 2) for _ in range(h * 2)]
+    tr = t_flip_h(g)
+    bl = t_flip_v(g)
+    br = t_rotate180(g)
+    for r in range(h):
+        for c in range(w):
+            out[r][c] = g[r][c]
+            out[r][c + w] = tr[r][c]
+            out[r + h][c] = bl[r][c]
+            out[r + h][c + w] = br[r][c]
+    return out
+
+
+def t_extract_first_column(g: Grid) -> Grid:
+    """Output is the first column of g as a Hx1 grid."""
+    h, _ = grid_dims(g)
+    return [[g[r][0]] for r in range(h)]
+
+
+def t_extract_first_row(g: Grid) -> Grid:
+    """Output is the first row of g as a 1xW grid."""
+    return [g[0][:]] if g else []
+
+
+def t_extract_last_column(g: Grid) -> Grid:
+    h, w = grid_dims(g)
+    return [[g[r][w - 1]] for r in range(h)]
+
+
+def t_extract_last_row(g: Grid) -> Grid:
+    return [g[-1][:]] if g else []
+
+
+def t_extract_middle_column(g: Grid) -> Grid | None:
+    h, w = grid_dims(g)
+    if w == 0:
+        return None
+    return [[g[r][w // 2]] for r in range(h)]
+
+
+def t_extract_middle_row(g: Grid) -> Grid | None:
+    h, _ = grid_dims(g)
+    if h == 0:
+        return None
+    return [g[h // 2][:]]
+
+
+def t_split_both_zero(g: Grid, axis: str, fill_color: int) -> Grid | None:
+    """Split g into halves along axis; output is where BOTH halves are 0, filled with fill_color."""
+    h, w = grid_dims(g)
+    if axis == "v":
+        if h % 2 != 0:
+            return None
+        half = h // 2
+        a = g[:half]; b = g[half:]
+        out: Grid = [[0] * w for _ in range(half)]
+        for r in range(half):
+            for c in range(w):
+                if a[r][c] == 0 and b[r][c] == 0:
+                    out[r][c] = fill_color
+        return out
+    elif axis == "h":
+        if w % 2 != 0:
+            return None
+        half = w // 2
+        out: Grid = [[0] * half for _ in range(h)]
+        for r in range(h):
+            for c in range(half):
+                if g[r][c] == 0 and g[r][c + half] == 0:
+                    out[r][c] = fill_color
+        return out
+    return None
+
+
 def t_overlay_grids(a: Grid, b: Grid, mode: str = "or") -> Grid | None:
     """Stack two equally-shaped grids, with one of (or, and, xor) semantics."""
     if grid_dims(a) != grid_dims(b):
@@ -2873,6 +3001,9 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _ca_programs(train_pairs)
         + _shape_preserving_programs(train_pairs)
         + _scale_programs(train_pairs)
+        + _kaleidoscope_programs(train_pairs)
+        + _row_col_extract_programs(train_pairs)
+        + _split_both_zero_programs(train_pairs)
         + _per_cell_substitute_programs(train_pairs)
         + _selection_programs(train_pairs)
         + _fill_programs(train_pairs)
