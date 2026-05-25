@@ -601,6 +601,30 @@ def _kaleidoscope_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     return []
 
 
+def _corner_subgrid_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Extract a fixed-size subgrid from a corner or center of the input."""
+    progs: list[Program] = []
+    # Detect output dimensions across training pairs
+    out_dims: set[tuple[int, int]] = set()
+    for _, out in train_pairs:
+        out_dims.add(grid_dims(out))
+    if len(out_dims) != 1:
+        return progs
+    h, w = next(iter(out_dims))
+    for name, fn in [
+        ("top_left", t_extract_top_left),
+        ("top_right", t_extract_top_right),
+        ("bottom_left", t_extract_bottom_left),
+        ("bottom_right", t_extract_bottom_right),
+        ("center", t_extract_center),
+    ]:
+        progs.append(Program(
+            f"extract_{name}_{h}x{w}",
+            lambda g, h=h, w=w, fn=fn: fn(g, h, w),
+        ))
+    return progs
+
+
 def _keep_only_row_col_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2484,6 +2508,38 @@ def t_kaleidoscope_2x2(g: Grid) -> Grid:
     return out
 
 
+def t_extract_subgrid_at(g: Grid, r0: int, c0: int, h: int, w: int) -> Grid | None:
+    """Extract the h×w subgrid starting at (r0, c0). None if out of bounds."""
+    H, W = grid_dims(g)
+    if r0 < 0 or c0 < 0 or r0 + h > H or c0 + w > W:
+        return None
+    return [row[c0:c0 + w] for row in g[r0:r0 + h]]
+
+
+def t_extract_top_left(g: Grid, h: int, w: int) -> Grid | None:
+    return t_extract_subgrid_at(g, 0, 0, h, w)
+
+
+def t_extract_top_right(g: Grid, h: int, w: int) -> Grid | None:
+    H, W = grid_dims(g)
+    return t_extract_subgrid_at(g, 0, W - w, h, w)
+
+
+def t_extract_bottom_left(g: Grid, h: int, w: int) -> Grid | None:
+    H, W = grid_dims(g)
+    return t_extract_subgrid_at(g, H - h, 0, h, w)
+
+
+def t_extract_bottom_right(g: Grid, h: int, w: int) -> Grid | None:
+    H, W = grid_dims(g)
+    return t_extract_subgrid_at(g, H - h, W - w, h, w)
+
+
+def t_extract_center(g: Grid, h: int, w: int) -> Grid | None:
+    H, W = grid_dims(g)
+    return t_extract_subgrid_at(g, (H - h) // 2, (W - w) // 2, h, w)
+
+
 def t_keep_only_column(g: Grid, c_idx: int) -> Grid:
     """Zero out everything except column c_idx."""
     h, w = grid_dims(g)
@@ -3274,6 +3330,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _draw_x_programs(train_pairs)
         + _pair_rectangle_programs(train_pairs)
         + _keep_only_row_col_programs(train_pairs)
+        + _corner_subgrid_programs(train_pairs)
         + _progressive_shift_programs(train_pairs)
         + _split_both_zero_programs(train_pairs)
         + _per_cell_substitute_programs(train_pairs)
