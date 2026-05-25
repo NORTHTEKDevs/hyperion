@@ -16,7 +16,7 @@ Hyperion is an open-source compositional-reasoning system that solves four publi
 | **PCFG** | Nested string-edit operations | **99.98%** | Published baselines: 50-80% |
 | **COGS gen** | English-like sentences with novel grammatical compositions | **99.75%** | Original Kim & Linzen 2020 transformer baseline: ~35%. Best published neuro-symbolic: 60-80%. |
 | **1D-ARC** | One-dimensional abstract grid puzzles (18 task types) | **100.00%** (901 / 901) | Joffe & Eliasmith 2025 hand-crafted VSA: 83% |
-| **2D ARC-AGI** | Full-blown 2D abstract reasoning puzzles | **17.50% training, 4.00% evaluation** | LLM-based state of the art: ~55-60%. Hodel-style hand-coded DSLs (~150 primitives): 30-40%. Human: ~85%. |
+| **2D ARC-AGI** | Full-blown 2D abstract reasoning puzzles | **18.75% training, 4.50% evaluation** | LLM-based state of the art: ~55-60%. Hodel-style hand-coded DSLs (~150 primitives): 30-40%. Human: ~85%. |
 
 ### How big the codebase is
 
