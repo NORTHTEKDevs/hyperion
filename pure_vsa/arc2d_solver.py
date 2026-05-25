@@ -1839,6 +1839,8 @@ def _paint_with_marker_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Pr
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
         return progs
     progs.append(Program("paint_with_marker_color", t_paint_with_marker_color))
+    progs.append(Program("recolor_row_by_first_nonzero", t_recolor_row_by_first_nonzero))
+    progs.append(Program("recolor_col_by_first_nonzero", t_recolor_col_by_first_nonzero))
     return progs
 
 
@@ -2555,6 +2557,46 @@ def t_self_similar_tile_by_mask(g: Grid, mask_color: int) -> Grid:
                 for r in range(h):
                     for c in range(w):
                         out[tr * h + r][tc * w + c] = g[r][c]
+    return out
+
+
+def t_recolor_row_by_first_nonzero(g: Grid) -> Grid:
+    """For each row: find the first non-zero cell's color, fill the whole row with that color."""
+    h, w = grid_dims(g)
+    out: Grid = []
+    for r in range(h):
+        first_color = 0
+        for c in range(w):
+            if g[r][c] != 0:
+                first_color = g[r][c]
+                break
+        out.append([first_color] * w)
+    return out
+
+
+def t_recolor_col_by_first_nonzero(g: Grid) -> Grid:
+    h, w = grid_dims(g)
+    out: Grid = [[0] * w for _ in range(h)]
+    for c in range(w):
+        first_color = 0
+        for r in range(h):
+            if g[r][c] != 0:
+                first_color = g[r][c]
+                break
+        for r in range(h):
+            out[r][c] = first_color
+    return out
+
+
+def t_recolor_row_by_count_to_color(g: Grid, count_to_color: dict[int, int]) -> Grid | None:
+    """For each row, count non-zero cells; fill row with count_to_color[count]."""
+    h, w = grid_dims(g)
+    out: Grid = []
+    for r in range(h):
+        n = sum(1 for c in range(w) if g[r][c] != 0)
+        if n not in count_to_color:
+            return None
+        out.append([count_to_color[n]] * w)
     return out
 
 
