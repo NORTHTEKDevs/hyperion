@@ -601,6 +601,34 @@ def _kaleidoscope_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program
     return []
 
 
+def _extend_cell_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    for d, fn in [("down", t_extend_each_cell_down),
+                   ("up", t_extend_each_cell_up),
+                   ("right", t_extend_each_cell_right),
+                   ("left", t_extend_each_cell_left)]:
+        progs.append(Program(f"extend_each_cell_{d}", fn))
+    return progs
+
+
+def _progressive_shift_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """When output has more rows than input, possibly progressive shift."""
+    progs: list[Program] = []
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if hi == 1 and ho > 1 and wo == wi:
+            for d in ("right", "left"):
+                n = ho
+                progs.append(Program(
+                    f"progressive_shift_{n}_{d}",
+                    lambda g, n=n, d=d: t_progressive_shift(g, n, d),
+                ))
+            break
+    return progs
+
+
 def _row_col_extract_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """Extract a specific row or column when output is 1xN or Nx1."""
     progs: list[Program] = []
@@ -2437,6 +2465,86 @@ def t_extract_middle_row(g: Grid) -> Grid | None:
     return [g[h // 2][:]]
 
 
+def t_extend_each_cell_down(g: Grid) -> Grid:
+    """For each non-zero cell, fill the column below it (down to bottom) with the same color."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for c in range(w):
+        # Find topmost non-zero in this column
+        for r in range(h):
+            if g[r][c] != 0:
+                # Fill down from r to bottom with g[r][c] (but don't overwrite different colors)
+                color = g[r][c]
+                for rr in range(r + 1, h):
+                    if out[rr][c] == 0:
+                        out[rr][c] = color
+                break  # only the topmost cell propagates
+    return out
+
+
+def t_extend_each_cell_up(g: Grid) -> Grid:
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for c in range(w):
+        for r in range(h - 1, -1, -1):
+            if g[r][c] != 0:
+                color = g[r][c]
+                for rr in range(r - 1, -1, -1):
+                    if out[rr][c] == 0:
+                        out[rr][c] = color
+                break
+    return out
+
+
+def t_extend_each_cell_right(g: Grid) -> Grid:
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] != 0:
+                color = g[r][c]
+                for cc in range(c + 1, w):
+                    if out[r][cc] == 0:
+                        out[r][cc] = color
+                break
+    return out
+
+
+def t_extend_each_cell_left(g: Grid) -> Grid:
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    for r in range(h):
+        for c in range(w - 1, -1, -1):
+            if g[r][c] != 0:
+                color = g[r][c]
+                for cc in range(c - 1, -1, -1):
+                    if out[r][cc] == 0:
+                        out[r][cc] = color
+                break
+    return out
+
+
+def t_progressive_shift(g: Grid, n_rows: int, direction: str) -> Grid | None:
+    """Output has n_rows rows; row r is input shifted by r positions in direction.
+    Assumes input is 1xW (single row)."""
+    h, w = grid_dims(g)
+    if h != 1:
+        return None
+    src = g[0]
+    out: Grid = []
+    for r in range(n_rows):
+        if direction == "right":
+            shifted = [0] * r + src[:w - r] if r <= w else [0] * w
+        elif direction == "left":
+            shifted = src[r:] + [0] * r if r <= w else [0] * w
+        else:
+            return None
+        # truncate/pad to w
+        shifted = shifted[:w] + [0] * max(0, w - len(shifted))
+        out.append(shifted)
+    return out
+
+
 def t_split_both_zero(g: Grid, axis: str, fill_color: int) -> Grid | None:
     """Split g into halves along axis; output is where BOTH halves are 0, filled with fill_color."""
     h, w = grid_dims(g)
@@ -3003,6 +3111,8 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _scale_programs(train_pairs)
         + _kaleidoscope_programs(train_pairs)
         + _row_col_extract_programs(train_pairs)
+        + _extend_cell_programs(train_pairs)
+        + _progressive_shift_programs(train_pairs)
         + _split_both_zero_programs(train_pairs)
         + _per_cell_substitute_programs(train_pairs)
         + _selection_programs(train_pairs)
