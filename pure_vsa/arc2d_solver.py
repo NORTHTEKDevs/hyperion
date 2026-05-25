@@ -613,6 +613,21 @@ def _extend_cell_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]
     return progs
 
 
+def _pair_rectangle_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    progs: list[Program] = []
+    if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        return progs
+    new_colors: set[int] = set()
+    for inp, out in train_pairs:
+        new_colors.update(colors_in(out) - colors_in(inp))
+    for nc in new_colors:
+        progs.append(Program(
+            f"fill_pair_bbox_rect_{nc}",
+            lambda g, nc=nc: t_fill_pair_bbox_rectangles(g, nc),
+        ))
+    return progs
+
+
 def _draw_x_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -1992,8 +2007,9 @@ def t_connect_two_points_of_color(g: Grid, color: int, line_color: int) -> Grid 
 
 
 def t_fill_between_same_color_markers(g: Grid, marker_color: int, fill_color: int) -> Grid:
-    """For each row and column, find pairs of cells with marker_color separated
-    by zeros, and fill the zeros between them with fill_color."""
+    """For each row and column, find runs of cells with marker_color separated
+    by zeros, fill the zeros BETWEEN consecutive markers with fill_color.
+    Handles arbitrary numbers of markers per row/column."""
     h, w = grid_dims(g)
     out = grid_copy(g)
     # Per row
@@ -2001,6 +2017,7 @@ def t_fill_between_same_color_markers(g: Grid, marker_color: int, fill_color: in
         positions = [c for c in range(w) if g[r][c] == marker_color]
         for i in range(len(positions) - 1):
             c1, c2 = positions[i], positions[i + 1]
+            # only fill if intermediate cells were all zero in INPUT
             if all(g[r][c] == 0 for c in range(c1 + 1, c2)):
                 for c in range(c1 + 1, c2):
                     if out[r][c] == 0:
@@ -2517,6 +2534,31 @@ def t_draw_x_from_marker(g: Grid, marker_color: int, line_color: int) -> Grid | 
         nr, nc = mr + d, mc - d
         if 0 <= nr < h and 0 <= nc < w and g[nr][nc] == bg:
             out[nr][nc] = line_color
+    return out
+
+
+def t_fill_pair_bbox_rectangles(g: Grid, fill_color: int) -> Grid:
+    """For each pair of same-color cells, fill the rectangle between them with fill_color.
+    Cells of different colors do not pair. Single-cell colors are skipped."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    from collections import defaultdict
+    by_color: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for r in range(h):
+        for c in range(w):
+            v = g[r][c]
+            if v != 0:
+                by_color[v].append((r, c))
+    for color, positions in by_color.items():
+        if len(positions) != 2:
+            continue
+        (r1, c1), (r2, c2) = positions
+        r_lo, r_hi = min(r1, r2), max(r1, r2)
+        c_lo, c_hi = min(c1, c2), max(c1, c2)
+        for r in range(r_lo, r_hi + 1):
+            for c in range(c_lo, c_hi + 1):
+                if out[r][c] == 0:
+                    out[r][c] = fill_color
     return out
 
 
@@ -3168,6 +3210,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _row_col_extract_programs(train_pairs)
         + _extend_cell_programs(train_pairs)
         + _draw_x_programs(train_pairs)
+        + _pair_rectangle_programs(train_pairs)
         + _progressive_shift_programs(train_pairs)
         + _split_both_zero_programs(train_pairs)
         + _per_cell_substitute_programs(train_pairs)
