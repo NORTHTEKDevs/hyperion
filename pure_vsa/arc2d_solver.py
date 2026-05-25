@@ -593,15 +593,30 @@ def _per_cell_substitute_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[
 
 def _kaleidoscope_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     """Kaleidoscope: detect when output is 2x in each dim and try the mirrored tile."""
+    progs: list[Program] = []
     for inp, out in train_pairs:
         hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
         if ho == 2 * hi and wo == 2 * wi:
-            return [
-                Program("kaleidoscope_2x2", t_kaleidoscope_2x2),
-                Program("rotational_kaleidoscope_2x2", t_rotational_kaleidoscope_2x2),
-            ]
-        break
-    return []
+            progs.append(Program("kaleidoscope_2x2", t_kaleidoscope_2x2))
+            progs.append(Program("rotational_kaleidoscope_2x2", t_rotational_kaleidoscope_2x2))
+            break
+    # Self-similar tiling: output is H*H by W*W
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if hi > 0 and wi > 0 and ho == hi * hi and wo == wi * wi:
+            # Try each input color as mask
+            in_colors: set[int] = set()
+            for inp2, _ in train_pairs:
+                in_colors.update(colors_in(inp2))
+            in_colors.discard(0)
+            for col in in_colors:
+                progs.append(Program(
+                    f"self_similar_tile_by_{col}",
+                    lambda g, col=col: t_self_similar_tile_by_mask(g, col),
+                ))
+            progs.append(Program("self_similar_tile_by_nonzero", t_self_similar_tile_by_nonzero))
+            break
+    return progs
 
 
 def _corner_subgrid_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
@@ -2508,6 +2523,33 @@ def t_kaleidoscope_2x2(g: Grid) -> Grid:
             out[r][c + w] = tr[r][c]
             out[r + h][c] = bl[r][c]
             out[r + h][c + w] = br[r][c]
+    return out
+
+
+def t_self_similar_tile_by_mask(g: Grid, mask_color: int) -> Grid:
+    """Output is HxH copies of input where each tile is input if g[r][c] == mask_color else zeros.
+    Only valid for square input; output dims are (H*H, W*W)."""
+    h, w = grid_dims(g)
+    out: Grid = [[0] * (w * w) for _ in range(h * h)]
+    for tr in range(h):
+        for tc in range(w):
+            if g[tr][tc] == mask_color:
+                for r in range(h):
+                    for c in range(w):
+                        out[tr * h + r][tc * w + c] = g[r][c]
+    return out
+
+
+def t_self_similar_tile_by_nonzero(g: Grid) -> Grid:
+    """Each output tile is input where g[r][c] != 0."""
+    h, w = grid_dims(g)
+    out: Grid = [[0] * (w * w) for _ in range(h * h)]
+    for tr in range(h):
+        for tc in range(w):
+            if g[tr][tc] != 0:
+                for r in range(h):
+                    for c in range(w):
+                        out[tr * h + r][tc * w + c] = g[r][c]
     return out
 
 
