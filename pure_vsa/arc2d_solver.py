@@ -1834,6 +1834,73 @@ def _marker_pattern_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
     return progs
 
 
+def _hodel_inspired_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
+    """Primitives ported / inspired by Hodel's ARC-DSL."""
+    progs: list[Program] = []
+
+    # trim: only fires when output is smaller by 2 in each dimension
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if hi - 2 == ho and wi - 2 == wo:
+            progs.append(Program("trim", t_trim))
+            break
+
+    # compress: try always when same-shape allowed AND output is smaller
+    progs.append(Program("compress", t_compress))
+
+    # Frame primitives (only when output is same shape and uses a learnable color)
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        new_colors: set[int] = set()
+        for inp, out in train_pairs:
+            new_colors.update(colors_in(out) - colors_in(inp))
+        for nc in new_colors:
+            progs.append(Program(
+                f"frame_inside_objects_{nc}",
+                lambda g, nc=nc: t_frame_inside_objects(g, nc),
+            ))
+            progs.append(Program(
+                f"outbox_objects_{nc}",
+                lambda g, nc=nc: t_outbox_objects(g, nc),
+            ))
+
+    # hsplit/vsplit overlay with N parts (induced from train ratios)
+    split_h_ratios: set[int] = set()
+    split_v_ratios: set[int] = set()
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if ho == hi and wo > 0 and wi % wo == 0 and wi // wo >= 2:
+            split_h_ratios.add(wi // wo)
+        if wo == wi and ho > 0 and hi % ho == 0 and hi // ho >= 2:
+            split_v_ratios.add(hi // ho)
+    new_cols_out: set[int] = set()
+    for _, out in train_pairs:
+        new_cols_out.update(colors_in(out))
+    new_cols_out.discard(0)
+    for n in split_h_ratios:
+        for mode in ("or", "and", "xor"):
+            progs.append(Program(
+                f"hsplit_{n}_overlay_{mode}",
+                lambda g, n=n, mode=mode: t_hsplit_overlay(g, n, mode),
+            ))
+            for nc in new_cols_out:
+                progs.append(Program(
+                    f"hsplit_{n}_overlay_{mode}_recolor_{nc}",
+                    lambda g, n=n, mode=mode, nc=nc: t_hsplit_overlay(g, n, mode, recolor=nc),
+                ))
+    for n in split_v_ratios:
+        for mode in ("or", "and", "xor"):
+            progs.append(Program(
+                f"vsplit_{n}_overlay_{mode}",
+                lambda g, n=n, mode=mode: t_vsplit_overlay(g, n, mode),
+            ))
+            for nc in new_cols_out:
+                progs.append(Program(
+                    f"vsplit_{n}_overlay_{mode}_recolor_{nc}",
+                    lambda g, n=n, mode=mode, nc=nc: t_vsplit_overlay(g, n, mode, recolor=nc),
+                ))
+    return progs
+
+
 def _paint_with_marker_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
     progs: list[Program] = []
     if not all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
@@ -2558,6 +2625,118 @@ def t_self_similar_tile_by_mask(g: Grid, mask_color: int) -> Grid:
                     for c in range(w):
                         out[tr * h + r][tc * w + c] = g[r][c]
     return out
+
+
+def t_trim(g: Grid) -> Grid | None:
+    """Remove the outer 1-cell border."""
+    h, w = grid_dims(g)
+    if h < 3 or w < 3:
+        return None
+    return [row[1:-1] for row in g[1:-1]]
+
+
+def t_compress(g: Grid) -> Grid | None:
+    """Remove consecutive duplicate rows and columns (period detection)."""
+    h, w = grid_dims(g)
+    if h == 0 or w == 0:
+        return None
+    # Dedupe rows
+    rows: list[list[int]] = []
+    for r in range(h):
+        if not rows or rows[-1] != g[r]:
+            rows.append(g[r][:])
+    # Dedupe columns
+    if not rows:
+        return None
+    new_w = len(rows[0])
+    keep_cols = [0]
+    for c in range(1, new_w):
+        if any(row[c] != row[keep_cols[-1]] for row in rows):
+            keep_cols.append(c)
+    out = [[row[c] for c in keep_cols] for row in rows]
+    return out
+
+
+def t_frame_inside_objects(g: Grid, frame_color: int) -> Grid | None:
+    """For each object, draw a frame of frame_color JUST INSIDE its bbox
+    (overwriting non-object cells in the bbox border)."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = grid_copy(g)
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        if r1 - r0 < 2 or c1 - c0 < 2:
+            continue
+        # Top and bottom edges of bbox
+        for c in range(c0, c1 + 1):
+            if (r0, c) not in o["cells"]:
+                out[r0][c] = frame_color
+            if (r1, c) not in o["cells"]:
+                out[r1][c] = frame_color
+        # Left and right edges
+        for r in range(r0, r1 + 1):
+            if (r, c0) not in o["cells"]:
+                out[r][c0] = frame_color
+            if (r, c1) not in o["cells"]:
+                out[r][c1] = frame_color
+    return out
+
+
+def t_outbox_objects(g: Grid, frame_color: int) -> Grid:
+    """For each object, draw a frame of frame_color JUST OUTSIDE its bbox."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    out = grid_copy(g)
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        # Top/bottom one above/below
+        for c in range(max(0, c0 - 1), min(w, c1 + 2)):
+            if r0 - 1 >= 0 and out[r0 - 1][c] == 0:
+                out[r0 - 1][c] = frame_color
+            if r1 + 1 < h and out[r1 + 1][c] == 0:
+                out[r1 + 1][c] = frame_color
+        for r in range(max(0, r0 - 1), min(h, r1 + 2)):
+            if c0 - 1 >= 0 and out[r][c0 - 1] == 0:
+                out[r][c0 - 1] = frame_color
+            if c1 + 1 < w and out[r][c1 + 1] == 0:
+                out[r][c1 + 1] = frame_color
+    return out
+
+
+def t_hsplit_overlay(g: Grid, n: int, mode: str = "or", recolor: int | None = None) -> Grid | None:
+    """Split g horizontally into n equal-width pieces; overlay them."""
+    h, w = grid_dims(g)
+    if w % n != 0 or n < 2:
+        return None
+    pw = w // n
+    parts = [[row[i * pw:(i + 1) * pw] for row in g] for i in range(n)]
+    result = parts[0]
+    for p in parts[1:]:
+        result = t_overlay_grids(result, p, mode)
+        if result is None:
+            return None
+    if recolor is None:
+        return result
+    return [[recolor if c != 0 else 0 for c in row] for row in result]
+
+
+def t_vsplit_overlay(g: Grid, n: int, mode: str = "or", recolor: int | None = None) -> Grid | None:
+    """Split g vertically into n equal-height pieces; overlay them."""
+    h, w = grid_dims(g)
+    if h % n != 0 or n < 2:
+        return None
+    ph = h // n
+    parts = [g[i * ph:(i + 1) * ph] for i in range(n)]
+    result = parts[0]
+    for p in parts[1:]:
+        result = t_overlay_grids(result, p, mode)
+        if result is None:
+            return None
+    if recolor is None:
+        return result
+    return [[recolor if c != 0 else 0 for c in row] for row in result]
 
 
 def t_recolor_row_by_first_nonzero(g: Grid) -> Grid:
@@ -3514,6 +3693,7 @@ def candidate_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Program]:
         + _marker_pattern_programs(train_pairs)
         + _paint_with_marker_programs(train_pairs)
         + _diagonal_stripe_programs(train_pairs)
+        + _hodel_inspired_programs(train_pairs)
         + _per_object_transform_programs(train_pairs)
         + _object_filter_programs(train_pairs)
         + _diagonal_programs(train_pairs)
