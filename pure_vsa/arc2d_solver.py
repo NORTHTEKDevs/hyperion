@@ -1848,6 +1848,44 @@ def _hodel_inspired_programs(train_pairs: list[tuple[Grid, Grid]]) -> list[Progr
     # compress: try always when same-shape allowed AND output is smaller
     progs.append(Program("compress", t_compress))
 
+    # Halves — fire when output is half the input in one dimension
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if ho == hi // 2 and wo == wi:
+            progs.append(Program("tophalf", t_tophalf))
+            progs.append(Program("bottomhalf", t_bottomhalf))
+            break
+    for inp, out in train_pairs:
+        hi, wi = grid_dims(inp); ho, wo = grid_dims(out)
+        if wo == wi // 2 and ho == hi:
+            progs.append(Program("lefthalf", t_lefthalf))
+            progs.append(Program("righthalf", t_righthalf))
+            break
+
+    # cover_color (remove a color entirely): try for each input color
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        in_colors: set[int] = set()
+        for inp, _ in train_pairs:
+            in_colors.update(colors_in(inp))
+        in_colors.discard(0)
+        for col in in_colors:
+            progs.append(Program(f"cover_color_{col}", lambda g, col=col: t_cover_color(g, col)))
+
+    # fill_object_deltas (fill bbox-but-not-object cells)
+    if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
+        new_colors: set[int] = set()
+        for inp, out in train_pairs:
+            new_colors.update(colors_in(out) - colors_in(inp))
+        for nc in new_colors:
+            progs.append(Program(
+                f"fill_object_deltas_{nc}",
+                lambda g, nc=nc: t_fill_object_deltas(g, nc),
+            ))
+            progs.append(Program(
+                f"connect_with_line_{nc}",
+                lambda g, nc=nc: t_connect_with_line(g, nc),
+            ))
+
     # Frame primitives (only when output is same shape and uses a learnable color)
     if all(grid_dims(i) == grid_dims(o) for i, o in train_pairs):
         new_colors: set[int] = set()
@@ -2624,6 +2662,96 @@ def t_self_similar_tile_by_mask(g: Grid, mask_color: int) -> Grid:
                 for r in range(h):
                     for c in range(w):
                         out[tr * h + r][tc * w + c] = g[r][c]
+    return out
+
+
+def t_tophalf(g: Grid) -> Grid | None:
+    h, _ = grid_dims(g)
+    if h < 2:
+        return None
+    return g[:h // 2]
+
+
+def t_bottomhalf(g: Grid) -> Grid | None:
+    h, _ = grid_dims(g)
+    if h < 2:
+        return None
+    return g[h // 2 + h % 2:]
+
+
+def t_lefthalf(g: Grid) -> Grid | None:
+    h, w = grid_dims(g)
+    if w < 2:
+        return None
+    return [row[:w // 2] for row in g]
+
+
+def t_righthalf(g: Grid) -> Grid | None:
+    h, w = grid_dims(g)
+    if w < 2:
+        return None
+    return [row[w // 2 + w % 2:] for row in g]
+
+
+def t_fill_object_deltas(g: Grid, fill_color: int) -> Grid | None:
+    """For each object, fill the cells in its bbox that AREN'T part of the object with fill_color."""
+    h, w = grid_dims(g)
+    objs = find_objects(g, by_color=True)
+    if not objs:
+        return None
+    out = grid_copy(g)
+    for o in objs:
+        r0, c0, r1, c1 = o["bbox"]
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                if (r, c) not in o["cells"] and out[r][c] == 0:
+                    out[r][c] = fill_color
+    return out
+
+
+def t_cover_color(g: Grid, color: int) -> Grid:
+    """Remove all cells of `color` (set to 0)."""
+    return [[0 if c == color else c for c in row] for row in g]
+
+
+def t_connect_with_line(g: Grid, line_color: int) -> Grid:
+    """Connect all non-zero cells of same color with straight horizontal,
+    vertical, or 45-degree lines."""
+    h, w = grid_dims(g)
+    out = grid_copy(g)
+    from collections import defaultdict
+    by_color: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for r in range(h):
+        for c in range(w):
+            v = g[r][c]
+            if v != 0:
+                by_color[v].append((r, c))
+    for color, pts in by_color.items():
+        if len(pts) < 2:
+            continue
+        # connect each pair
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                (r1, c1), (r2, c2) = pts[i], pts[j]
+                dr = r2 - r1; dc = c2 - c1
+                if dr == 0:
+                    # horizontal
+                    for cc in range(min(c1, c2), max(c1, c2) + 1):
+                        if out[r1][cc] == 0:
+                            out[r1][cc] = line_color
+                elif dc == 0:
+                    for rr in range(min(r1, r2), max(r1, r2) + 1):
+                        if out[rr][c1] == 0:
+                            out[rr][c1] = line_color
+                elif abs(dr) == abs(dc):
+                    # diagonal
+                    steps = abs(dr)
+                    sr = 1 if dr > 0 else -1
+                    sc = 1 if dc > 0 else -1
+                    for k in range(steps + 1):
+                        rr = r1 + k * sr; cc = c1 + k * sc
+                        if 0 <= rr < h and 0 <= cc < w and out[rr][cc] == 0:
+                            out[rr][cc] = line_color
     return out
 
 
